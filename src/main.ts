@@ -5,9 +5,15 @@ import { buildHexMesh } from './render/mesh';
 import { createTerrainPipeline } from './render/terrainPipeline';
 import { createWaterPipeline } from './render/waterPipeline';
 import { createFrameRenderer } from './render/frame';
-import { generateTerrain, type TerrainGenParams } from './terrain/generator';
+import { createCursorPipeline, CURSOR_RING_SEGMENTS } from './render/cursorPipeline';
+import { sampleHeightField } from './terrain/sample';
+import { generateTerrain, floodFillWater, type TerrainGenParams } from './terrain/generator';
 import { OrbitCamera } from './camera/orbitCamera';
 import { createControlPanel } from './ui/controls';
+import { createToolbar } from './ui/toolbar';
+import { pickTerrain } from './interaction/picking';
+import { applyBrush, type ToolId, type MaterialArrays } from './interaction/brush';
+import { createUndoStack } from './interaction/undoStack';
 
 const FIELD_SIZE = 1024;
 const MESH_SIZE = 512;
@@ -68,7 +74,10 @@ async function main() {
     return { terrainData, surfaceHeight };
   }
 
-  const { terrainData, surfaceHeight } = generateAndPack(TERRAIN_PARAMS);
+  const initial = generateAndPack(TERRAIN_PARAMS);
+  let currentSurfaceHeight = initial.surfaceHeight;
+  let currentTerrainData: MaterialArrays = initial.terrainData;
+  const { terrainData, surfaceHeight } = initial;
 
   const mesh = buildHexMesh({
     meshCols: MESH_SIZE,
@@ -99,11 +108,18 @@ async function main() {
     FIELD_SIZE
   );
   const frame = createFrameRenderer(gpu);
+  const cursor = createCursorPipeline(gpu);
+
+  const undoStack = createUndoStack(5); // "a few actions" — brush strokes only, see undoStack.ts
 
   createControlPanel(TERRAIN_PARAMS, (newParams) => {
     const generated = generateAndPack(newParams);
+    currentSurfaceHeight = generated.surfaceHeight;
+    currentTerrainData = generated.terrainData;
     terrain.updateTerrainData(generated.surfaceHeight, generated.terrainData.earth, generated.terrainData.sand, newParams.maxSoilDepth);
     water.updateWaterData(generated.terrainData.water);
+    undoStack.clear(); // old snapshots belong to a terrain that no longer exists
+    toolbar.setUndoEnabled(false);
   });
 
   const worldWidth = FIELD_SIZE * HEX_SIZE * Math.sqrt(3);
@@ -114,7 +130,156 @@ async function main() {
     target: [worldWidth / 2, 0, (FIELD_SIZE * HEX_SIZE * 1.5) / 2],
   });
 
+  // Brush editing (M2). Touch picking was validated as tap-to-log earlier
+  // in this milestone; this replaces that with real painting.
+  const maxPickDistance = worldWidth * 3;
+
+  let activeTool: ToolId | null = null;
+  let cursorPoint: { x: number; y: number; z: number } | null = null;
+  let levelReference: number | null = null; // Level tool: set at stroke start, cleared at stroke end — a single continuous gesture
+  let fillToLevelReference: number | null = null; // Fill to Level: set by a sampling tap, persists across separate strokes until the tool is deselected
+  let touchedCellsThisStroke: Set<number> | null = null;
+  const toolbar = createToolbar(
+    (tool) => {
+      if (activeTool === 'fillToLevel' && tool !== 'fillToLevel') {
+        fillToLevelReference = null; // leaving the tool primes it to sample fresh next time
+      }
+      activeTool = tool;
+      camera.setPanEnabled(tool === null);
+      if (!tool) cursorPoint = null;
+    },
+    () => {
+      const snapshot = undoStack.undo();
+      if (!snapshot) return;
+      currentTerrainData = snapshot;
+      for (let i = 0; i < currentSurfaceHeight.length; i++) {
+        currentSurfaceHeight[i] = snapshot.rock[i]! + snapshot.earth[i]! + snapshot.sand[i]!;
+      }
+      const waterDepth = floodFillWater(currentSurfaceHeight, FIELD_SIZE, FIELD_SIZE, TERRAIN_PARAMS.waterLevel);
+      terrain.updateTerrainData(currentSurfaceHeight, snapshot.earth, snapshot.sand, TERRAIN_PARAMS.maxSoilDepth);
+      water.updateWaterData(waterDepth);
+      toolbar.setUndoEnabled(undoStack.canUndo());
+    }
+  );
+
+  function screenToRay(e: PointerEvent) {
+    const rect = canvas.getBoundingClientRect();
+    const ndcX = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = -(((e.clientY - rect.top) / rect.height) * 2 - 1);
+    const aspect = gpu!.canvas.width / gpu!.canvas.height;
+    return camera.pickRay(ndcX, ndcY, aspect);
+  }
+
+  function paintAt(e: PointerEvent): void {
+    if (!activeTool) return;
+    const ray = screenToRay(e);
+    const hit = pickTerrain(ray, currentSurfaceHeight, FIELD_SIZE, FIELD_SIZE, HEX_SIZE, maxPickDistance);
+    if (!hit) {
+      cursorPoint = null;
+      return;
+    }
+    cursorPoint = { x: hit.point[0], y: hit.point[1], z: hit.point[2] };
+
+    // Level: a single continuous gesture — first touch of the stroke sets
+    // the reference. Fill to Level's reference is handled separately, in
+    // the pointerdown handler below, since it's sampled by its own discrete
+    // tap rather than the start of the applying stroke.
+    if (activeTool === 'level' && levelReference === null) {
+      levelReference = hit.point[1];
+    }
+
+    const box = applyBrush(
+      activeTool,
+      hit.q,
+      hit.r,
+      currentTerrainData,
+      FIELD_SIZE,
+      FIELD_SIZE,
+      HEX_SIZE,
+      TERRAIN_PARAMS.worldStepX,
+      TERRAIN_PARAMS.worldStepZ,
+      {
+        radius: toolbar.settings.size,
+        strength: toolbar.settings.intensity,
+        steepness: toolbar.settings.steepness,
+        material: toolbar.getActiveMaterial(),
+        levelReference: (activeTool === 'fillToLevel' ? fillToLevelReference : levelReference) ?? undefined,
+        touchedCellsThisStroke: touchedCellsThisStroke ?? undefined,
+      }
+    );
+
+    for (let row = box.rowMin; row <= box.rowMax; row++) {
+      for (let col = box.colMin; col <= box.colMax; col++) {
+        const idx = row * FIELD_SIZE + col;
+        currentSurfaceHeight[idx] =
+          currentTerrainData.rock[idx]! + currentTerrainData.earth[idx]! + currentTerrainData.sand[idx]!;
+      }
+    }
+    terrain.updateTerrainRegion(box, currentSurfaceHeight, currentTerrainData.earth, currentTerrainData.sand);
+    // Water isn't re-flooded on brush edits yet — there's no simulation
+    // driving it until M3, so a freshly-raised dam wouldn't hold anything
+    // back yet regardless. Revisit once M3 lands.
+  }
+
+  let isPainting = false;
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!activeTool || !e.isPrimary) return;
+    isPainting = true;
+
+    // Fill to Level's reference is set by its own discrete tap — doesn't
+    // paint anything, so no undo snapshot or touched-cells tracking either.
+    // Any touch after this one (a separate stroke, possibly somewhere
+    // entirely different on the map) applies using the sampled reference.
+    if (activeTool === 'fillToLevel' && fillToLevelReference === null) {
+      const ray = screenToRay(e);
+      const hit = pickTerrain(ray, currentSurfaceHeight, FIELD_SIZE, FIELD_SIZE, HEX_SIZE, maxPickDistance);
+      if (hit) {
+        fillToLevelReference = hit.point[1];
+        cursorPoint = { x: hit.point[0], y: hit.point[1], z: hit.point[2] };
+      }
+      return;
+    }
+
+    touchedCellsThisStroke = new Set();
+    undoStack.push({
+      rock: currentTerrainData.rock.slice(),
+      earth: currentTerrainData.earth.slice(),
+      sand: currentTerrainData.sand.slice(),
+    });
+    toolbar.setUndoEnabled(true);
+    paintAt(e);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (isPainting && e.isPrimary) paintAt(e);
+  });
+  const stopPainting = () => {
+    isPainting = false;
+    cursorPoint = null;
+    levelReference = null; // next stroke establishes its own fresh reference
+    touchedCellsThisStroke = null;
+  };
+  canvas.addEventListener('pointerup', stopPainting);
+  canvas.addEventListener('pointercancel', stopPainting);
+
   const lightDir: [number, number, number] = [0.4, 0.8, 0.3];
+
+  // One height sample per ring vertex, computed here on the CPU (reusing the
+  // same lookup picking already uses) so the ring actually hugs the terrain
+  // it's about to paint — rather than sitting flat at a fixed height and
+  // getting depth-occluded behind ridges, which looked like the brush was
+  // skipping hidden terrain when it was really just the indicator lying.
+  const cursorRingPoints = new Float32Array((CURSOR_RING_SEGMENTS + 1) * 3);
+  function updateCursorRingPoints(centerX: number, centerY: number, centerZ: number, radius: number): void {
+    for (let i = 0; i <= CURSOR_RING_SEGMENTS; i++) {
+      const a = (i / CURSOR_RING_SEGMENTS) * Math.PI * 2;
+      const x = centerX + Math.cos(a) * radius;
+      const z = centerZ + Math.sin(a) * radius;
+      const h = sampleHeightField(x, z, currentSurfaceHeight, FIELD_SIZE, FIELD_SIZE, HEX_SIZE) ?? centerY;
+      cursorRingPoints[i * 3] = x;
+      cursorRingPoints[i * 3 + 1] = h + 0.5; // small lift to reduce z-fighting with the terrain surface
+      cursorRingPoints[i * 3 + 2] = z;
+    }
+  }
 
   function tick() {
     const aspect = gpu!.canvas.width / gpu!.canvas.height;
@@ -122,9 +287,15 @@ async function main() {
     terrain.updateUniforms(viewProj, lightDir);
     water.updateUniforms(viewProj);
 
+    if (cursorPoint) {
+      updateCursorRingPoints(cursorPoint.x, cursorPoint.y, cursorPoint.z, toolbar.settings.size);
+      cursor.update(viewProj, cursorRingPoints);
+    }
+
     frame.render({ r: 0.6, g: 0.75, b: 0.9, a: 1 }, (pass) => {
       terrain.draw(pass);
       water.draw(pass);
+      if (cursorPoint) cursor.draw(pass);
     });
 
     diagnostics.recordFrame();

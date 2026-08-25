@@ -1,7 +1,7 @@
 # 00 — STATE (read this first)
 
 **Project: Qattara** — working title.
-**Last updated:** 2026-08-25 (M0 and M1 both completed same day)
+**Last updated:** 2026-08-25 (M0 and M1 complete; M2 in progress)
 
 ---
 
@@ -14,11 +14,12 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 | Item | Status |
 | --- | --- |
 | Brief and name | `01-brief.md` |
-| Decisions D1–D13 | Settled — `02-decisions.md` |
+| Decisions D1–D14 | Settled — `02-decisions.md` |
 | Design outline | Complete — `03-outline.md` |
 | M0 | **Complete** — `04-m0-brief.md`. Go/no-go passed: 60fps on both iPad and iPhone with real geometry. |
 | M1 | **Complete.** Procedural generator with player-facing sliders (ruggedness, depth/elevation range, rockiness, sand reach, water level) plus New Seed/Random/Flat presets. See D13. |
-| Code | Vite + TypeScript + WebGPU scaffold in `~/projects/qattara` on milliwaysserver. Hex coordinate helpers (tested), hex mesh + procedural terrain generator (tested), displacement/lighting shader, touch orbit camera, slider UI, on-device diagnostics overlay. |
+| M2 | **In progress.** Touch picking, six brush tools (Raise/Lower/Level/Fill to Level/Smooth/Ruggedize), Materials selector, undo, terrain-conforming cursor ring — all working. See D14. Not yet done: no water simulation to actually respond to brush edits (that's M3), and Smooth/Ruggedize's interaction model is flagged for revisit (P5). |
+| Code | Vite + TypeScript + WebGPU scaffold in `~/projects/qattara` on milliwaysserver. Hex coordinate helpers (tested), hex mesh + procedural terrain generator (tested), displacement/lighting shader, touch orbit camera, brush editing + tool/material UI, undo, on-device diagnostics overlay. |
 
 ## 3. The decisions that matter most
 
@@ -33,9 +34,12 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 
 ## 4. Immediate next action
 
-Start **M2** — brush editing (raise, lower, paint sand/earth/rock). Touch picking (screen ray → hex cell) hasn't been built yet and is a prerequisite.
+**Small item first, before anything else:** the tools/brush panel (`src/ui/toolbar.ts`) needs to be collapsible. Collapsing must be functionally equivalent to deselecting/unequipping the active tool — same cleanup as tapping the active tool's button again: touch goes back to camera-only navigation (`camera.setPanEnabled(true)`), Fill to Level's persisted reference resets, `cursorPoint` clears, anything else that already runs on deselect. Don't build collapse as just a visual hide with the tool still secretly active underneath.
+
+After that: M2's brush editing is otherwise functionally solid; Dane's own stated priority for the next session is **M3 — water** (rain, springs, pipe-model flow, evaporation). Brush edits currently don't affect the water at all (no simulation exists yet to respond to them) — that gap closes once M3 lands.
 
 **Parked, do not forget:**
+- P5 — Smooth/Ruggedize's once-per-cell-per-stroke interaction model works but isn't considered final; look for something better.
 - P3 — camera control inversion toggles (pan/tilt), once there's a settings surface to put them in.
 - P4 — visual indicator for dry land below water level, at M5 (relief shading).
 - P2 — salinity, a plausible post-v1 addition.
@@ -47,3 +51,5 @@ This project was scoped in a Claude Cowork session on 2026-08-25. Two decisions 
 M0 was built and passed go/no-go the same day (2026-08-25), in a separate session. See D11 in `02-decisions.md` for a dev-workflow correction discovered during that work — the LAN-IP-over-HTTP dev serving assumption in this file and `04-m0-brief.md` turned out not to work for WebGPU and has been corrected.
 
 M1 (procedural terrain generation) was also built the same day, in a third session, iterating directly with Dane against the running app over Tailscale. Notable finds along the way: a real hex-grid neighbour-parity bug affecting the mesh, shading, and generator alike (D12 — will matter again for M4's erosion flux), and a noise-technique artifact in ridged noise fixed by per-octave rotation (also D12). The generator itself — region/macro noise layers, connectivity-based water, independent depth/elevation ranges — is D13.
+
+M2 (brush editing) was started the same day, in a fourth session, again iterating live against the running app. Six tools built (D14) plus undo and a terrain-conforming cursor ring, working well enough that Dane wanted to move on to water next, though he ran out of time this session. Paused mid-milestone, not completed — pick back up here rather than assuming M2 is finished.

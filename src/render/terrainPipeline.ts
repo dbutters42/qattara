@@ -1,6 +1,7 @@
 import shaderSrc from './terrain.wgsl?raw';
 import type { HexMesh } from './mesh';
 import type { GpuContext } from './webgpu';
+import type { BoundingBox } from '../interaction/brush';
 
 export interface TerrainPipeline {
   heightTexture: GPUTexture;
@@ -9,6 +10,8 @@ export interface TerrainPipeline {
   updateUniforms(viewProj: Float32Array, lightDir: [number, number, number]): void;
   /** Re-uploads generated data in place — no pipeline/texture recreation, matching "editing the world is a texture write". */
   updateTerrainData(heightData: Float32Array, earthData: Float32Array, sandData: Float32Array, maxSoilDepth: number): void;
+  /** Re-uploads just a sub-rectangle — brush edits touch a small area many times a second; a full-field write would be wasteful. */
+  updateTerrainRegion(box: BoundingBox, heightData: Float32Array, earthData: Float32Array, sandData: Float32Array): void;
   draw(pass: GPURenderPassEncoder): void;
 }
 
@@ -42,6 +45,20 @@ export function createTerrainPipeline(
       data as Float32Array<ArrayBuffer>,
       { bytesPerRow: fieldCols * 4, rowsPerImage: fieldRows },
       { width: fieldCols, height: fieldRows }
+    );
+  }
+
+  function writeR32FloatRegion(texture: GPUTexture, data: Float32Array, box: BoundingBox): void {
+    const w = box.colMax - box.colMin + 1;
+    const h = box.rowMax - box.rowMin + 1;
+    // `offset`/`bytesPerRow` describe the *source* layout, which can be (and
+    // here is) larger than the copied region — no need to repack a
+    // sub-rectangle into its own compact buffer first.
+    device.queue.writeTexture(
+      { texture, origin: { x: box.colMin, y: box.rowMin } },
+      data as Float32Array<ArrayBuffer>,
+      { offset: (box.rowMin * fieldCols + box.colMin) * 4, bytesPerRow: fieldCols * 4, rowsPerImage: fieldRows },
+      { width: w, height: h }
     );
   }
 
@@ -147,6 +164,17 @@ export function createTerrainPipeline(
     uniformData[22] = newMaxSoilDepth;
   }
 
+  function updateTerrainRegion(
+    box: BoundingBox,
+    newHeightData: Float32Array,
+    newEarthData: Float32Array,
+    newSandData: Float32Array
+  ): void {
+    writeR32FloatRegion(heightTexture, newHeightData, box);
+    writeR32FloatRegion(earthTexture, newEarthData, box);
+    writeR32FloatRegion(sandTexture, newSandData, box);
+  }
+
   function draw(pass: GPURenderPassEncoder): void {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
@@ -155,5 +183,5 @@ export function createTerrainPipeline(
     pass.drawIndexed(mesh.indices.length);
   }
 
-  return { heightTexture, vertexBuffer, indexBuffer, updateUniforms, updateTerrainData, draw };
+  return { heightTexture, vertexBuffer, indexBuffer, updateUniforms, updateTerrainData, updateTerrainRegion, draw };
 }
