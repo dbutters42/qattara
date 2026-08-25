@@ -2,12 +2,15 @@ struct Uniforms {
   viewProj: mat4x4<f32>,
   // xyz = directional light vector (toward the light), w unused.
   lightDir: vec4<f32>,
-  // World-space distance between adjacent height-field texels, x = column, y = row.
+  // x/y = world-space distance between adjacent height-field texels
+  // (column/row), z = max soil depth (for material-fraction debug colouring), w unused.
   worldStep: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var heightTex: texture_2d<f32>;
+@group(0) @binding(2) var earthTex: texture_2d<f32>;
+@group(0) @binding(3) var sandTex: texture_2d<f32>;
 
 struct VertexOutput {
   @builtin(position) clipPos: vec4<f32>,
@@ -33,10 +36,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   // compute-shader-updated simulation grid, and sidesteps the
   // float32-filterable optional-feature question entirely.
   let base = vec2<i32>(i32(round(in.texel.x)), i32(round(in.texel.y)));
+  // Left/right (same row, adjacent column) are genuine hex neighbours
+  // regardless of row parity — no correction needed.
   let hL = textureLoad(heightTex, base + vec2<i32>(-1, 0), 0).r;
   let hR = textureLoad(heightTex, base + vec2<i32>(1, 0), 0).r;
-  let hD = textureLoad(heightTex, base + vec2<i32>(0, -1), 0).r;
-  let hU = textureLoad(heightTex, base + vec2<i32>(0, 1), 0).r;
+  // Up/down are NOT: a true hex neighbour one row away needs a column
+  // offset that flips with row parity (same reason the mesh triangulation
+  // needed to alternate its diagonal — see buildHexMesh). Using a fixed
+  // (0,-1)/(0,1) offset here is only a real neighbour for one parity and
+  // produces a regular banding artifact in the shading, independent of
+  // whether the mesh geometry itself is correct.
+  let rowEven = (base.y & 1) == 0;
+  let upOffset = select(vec2<i32>(1, 1), vec2<i32>(0, 1), rowEven);
+  let downOffset = select(vec2<i32>(0, -1), vec2<i32>(-1, -1), rowEven);
+  let hU = textureLoad(heightTex, base + upOffset, 0).r;
+  let hD = textureLoad(heightTex, base + downOffset, 0).r;
 
   let dHdx = (hR - hL) / (2.0 * uniforms.worldStep.x);
   let dHdz = (hU - hD) / (2.0 * uniforms.worldStep.y);
@@ -46,8 +60,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let diffuse = max(dot(normal, lightDir), 0.0);
   let ambient = 0.3;
 
-  // Placeholder single earth tone — per-material colour arrives with M2's brushes.
-  let baseColor = vec3<f32>(0.55, 0.5, 0.4);
+  // TEMPORARY debug material colouring — not the real M5 shading (relief
+  // shading/AO/material texturing comes later). Just enough to see whether
+  // generation-time slope/elevation placement is doing something sensible.
+  // rock isn't a clean 0..1 fraction (it's a bedrock *height*, can be any
+  // sign/magnitude) — but earth+sand are clean small depths, so rock's share
+  // is recovered as "whatever fraction of maxSoilDepth isn't soil".
+  let maxSoilDepth = uniforms.worldStep.z;
+  let earthDepth = textureLoad(earthTex, base, 0).r;
+  let sandDepth = textureLoad(sandTex, base, 0).r;
+  let soilDepth = earthDepth + sandDepth;
+  let rockFrac = clamp(1.0 - soilDepth / maxSoilDepth, 0.0, 1.0);
+  let sandFracOfSoil = sandDepth / max(soilDepth, 0.001);
+
+  let rockColor = vec3<f32>(0.5, 0.5, 0.52);
+  let earthColor = vec3<f32>(0.45, 0.33, 0.2);
+  let sandColor = vec3<f32>(0.76, 0.7, 0.5);
+  let soilColor = mix(earthColor, sandColor, sandFracOfSoil);
+  let baseColor = mix(soilColor, rockColor, rockFrac);
+
   let color = baseColor * (ambient + diffuse * 0.75);
   return vec4<f32>(color, 1.0);
 }

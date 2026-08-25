@@ -3,13 +3,22 @@ import type { HexMesh } from './mesh';
 import type { GpuContext } from './webgpu';
 
 export interface TerrainPipeline {
-  render(viewProj: Float32Array, lightDir: [number, number, number]): void;
+  heightTexture: GPUTexture;
+  vertexBuffer: GPUBuffer;
+  indexBuffer: GPUBuffer;
+  updateUniforms(viewProj: Float32Array, lightDir: [number, number, number]): void;
+  /** Re-uploads generated data in place — no pipeline/texture recreation, matching "editing the world is a texture write". */
+  updateTerrainData(heightData: Float32Array, earthData: Float32Array, sandData: Float32Array, maxSoilDepth: number): void;
+  draw(pass: GPURenderPassEncoder): void;
 }
 
 export function createTerrainPipeline(
   gpu: GpuContext,
   mesh: HexMesh,
   heightData: Float32Array,
+  earthData: Float32Array,
+  sandData: Float32Array,
+  maxSoilDepth: number,
   fieldCols: number,
   fieldRows: number
 ): TerrainPipeline {
@@ -27,29 +36,43 @@ export function createTerrainPipeline(
   });
   device.queue.writeBuffer(indexBuffer, 0, mesh.indices as Uint32Array<ArrayBuffer>);
 
-  const heightTexture = device.createTexture({
-    size: { width: fieldCols, height: fieldRows },
-    format: 'r32float',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
-  device.queue.writeTexture(
-    { texture: heightTexture },
-    heightData as Float32Array<ArrayBuffer>,
-    { bytesPerRow: fieldCols * 4, rowsPerImage: fieldRows },
-    { width: fieldCols, height: fieldRows }
-  );
+  function writeR32Float(texture: GPUTexture, data: Float32Array): void {
+    device.queue.writeTexture(
+      { texture },
+      data as Float32Array<ArrayBuffer>,
+      { bytesPerRow: fieldCols * 4, rowsPerImage: fieldRows },
+      { width: fieldCols, height: fieldRows }
+    );
+  }
+
+  function uploadR32Float(data: Float32Array): GPUTexture {
+    const texture = device.createTexture({
+      size: { width: fieldCols, height: fieldRows },
+      format: 'r32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    writeR32Float(texture, data);
+    return texture;
+  }
+
+  const heightTexture = uploadR32Float(heightData);
+  const earthTexture = uploadR32Float(earthData);
+  const sandTexture = uploadR32Float(sandData);
 
   const uniformBuffer = device.createBuffer({
-    size: 96, // mat4x4 viewProj (64) + lightDir vec4 (16) + worldStep vec4 (16)
+    size: 96, // mat4x4 viewProj (64) + lightDir vec4 (16) + worldStep/maxSoilDepth vec4 (16)
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
+  // unfilterable-float on all three: we only ever textureLoad (exact texel
+  // fetch), never sample — sidesteps the float32-filterable optional-feature
+  // question entirely.
   const bindGroupLayout = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-      // unfilterable-float: we only ever textureLoad (exact texel fetch), never sample —
-      // sidesteps the float32-filterable optional-feature question entirely.
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
     ],
   });
 
@@ -58,6 +81,8 @@ export function createTerrainPipeline(
     entries: [
       { binding: 0, resource: { buffer: uniformBuffer } },
       { binding: 1, resource: heightTexture.createView() },
+      { binding: 2, resource: earthTexture.createView() },
+      { binding: 3, resource: sandTexture.createView() },
     ],
   });
 
@@ -95,58 +120,40 @@ export function createTerrainPipeline(
     },
   });
 
-  let depthTexture = createDepthTexture(device, gpu.canvas.width, gpu.canvas.height);
-
-  // Layout must match the WGSL struct exactly: viewProj (0-15), lightDir (16-19), worldStep (20-23).
+  // Layout must match the WGSL struct exactly: viewProj (0-15), lightDir
+  // (16-19), worldStep.xy + maxSoilDepth in .z (20-23).
   const uniformData = new Float32Array(24);
   uniformData[20] = mesh.worldStepX;
   uniformData[21] = mesh.worldStepZ;
+  uniformData[22] = maxSoilDepth;
 
-  function render(viewProj: Float32Array, lightDir: [number, number, number]): void {
-    if (depthTexture.width !== gpu.canvas.width || depthTexture.height !== gpu.canvas.height) {
-      depthTexture.destroy();
-      depthTexture = createDepthTexture(device, gpu.canvas.width, gpu.canvas.height);
-    }
-
+  function updateUniforms(viewProj: Float32Array, lightDir: [number, number, number]): void {
     uniformData.set(viewProj, 0);
     uniformData[16] = lightDir[0];
     uniformData[17] = lightDir[1];
     uniformData[18] = lightDir[2];
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+  }
 
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: gpu.context.getCurrentTexture().createView(),
-          clearValue: { r: 0.6, g: 0.75, b: 0.9, a: 1 },
-          loadOp: 'clear',
-          storeOp: 'store',
-        },
-      ],
-      depthStencilAttachment: {
-        view: depthTexture.createView(),
-        depthClearValue: 1.0,
-        depthLoadOp: 'clear',
-        depthStoreOp: 'store',
-      },
-    });
+  function updateTerrainData(
+    newHeightData: Float32Array,
+    newEarthData: Float32Array,
+    newSandData: Float32Array,
+    newMaxSoilDepth: number
+  ): void {
+    writeR32Float(heightTexture, newHeightData);
+    writeR32Float(earthTexture, newEarthData);
+    writeR32Float(sandTexture, newSandData);
+    uniformData[22] = newMaxSoilDepth;
+  }
+
+  function draw(pass: GPURenderPassEncoder): void {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.setVertexBuffer(0, vertexBuffer);
     pass.setIndexBuffer(indexBuffer, 'uint32');
     pass.drawIndexed(mesh.indices.length);
-    pass.end();
-    device.queue.submit([encoder.finish()]);
   }
 
-  return { render };
-}
-
-function createDepthTexture(device: GPUDevice, width: number, height: number): GPUTexture {
-  return device.createTexture({
-    size: { width, height },
-    format: 'depth24plus',
-    usage: GPUTextureUsage.RENDER_ATTACHMENT,
-  });
+  return { heightTexture, vertexBuffer, indexBuffer, updateUniforms, updateTerrainData, draw };
 }
