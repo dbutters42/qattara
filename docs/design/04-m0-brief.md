@@ -1,6 +1,6 @@
 # 04 — M0 BRIEF
 
-**Status:** not started. This is the current milestone.
+**Status:** complete, go/no-go passed (2026-08-25).
 **Purpose:** M0 is a **go / no-go gate**. It proves the rendering approach and the WebGPU toolchain work on the actual target device before anything else gets built.
 
 ---
@@ -13,16 +13,18 @@ No simulation. No editing. No water. No procedural generation worth the name —
 
 ## 2. Success criteria
 
-| Criterion | Target |
-| --- | --- |
-| Sustained frame rate on iPad | 60 fps |
-| Frame rate on iPhone | ≥ 30 fps |
-| Grid | 1024 × 1024 hex cells in the height field |
-| Mesh | ~512 × 512 vertices sampling that field |
-| Camera | Pan, pinch-zoom, tilt (clamped away from horizontal), all touch-driven |
-| Loads over LAN from the Ubuntu dev server on the iPad | Yes |
+| Criterion | Target | Result |
+| --- | --- | --- |
+| Sustained frame rate on iPad | 60 fps | **60 fps**, met |
+| Frame rate on iPhone | ≥ 30 fps | **60 fps**, exceeded |
+| Grid | 1024 × 1024 hex cells in the height field | Met |
+| Mesh | ~512 × 512 vertices sampling that field | Met |
+| Camera | Pan, pinch-zoom, tilt (clamped away from horizontal), all touch-driven | Met — also added two-finger orbit (yaw), not originally listed here but needed to make the camera actually usable |
+| Loads over LAN from the Ubuntu dev server on the iPad | Yes | **Corrected, not as originally assumed** — see D11 in `02-decisions.md`. Plain LAN-by-IP over HTTP doesn't work for WebGPU (needs a secure context); actual setup is Tailscale Serve over HTTPS. |
 
 **If these numbers don't hold, stop and revisit the architecture.** Do not proceed to M1 on a failing M0. Options at that point include reducing mesh density, reducing field resolution, rendering at lower internal resolution and upscaling, or reconsidering the displaced-mesh approach entirely.
+
+*(Not needed this time — both platforms passed comfortably.)*
 
 ## 3. Scope boundaries
 

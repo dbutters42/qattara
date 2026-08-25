@@ -50,6 +50,6 @@ Dane has specific ideas about **player-facing terrain-generation inputs**. Ask h
 ## Dev environment notes
 
 - No Mac. Windows desktop plus an Ubuntu server. Native iOS is off the table; a future App Store build would need a cloud macOS runner.
-- Serve dev builds from the Ubuntu server over LAN and open them on the iPad by IP — faster than pushing to GitHub Pages each iteration.
-- iOS Safari Web Inspector needs macOS. Use an in-page console overlay (eruda / vconsole) by default; `ios-webkit-debug-proxy` when real DevTools are needed.
+- **Dev builds must be served over HTTPS, not plain LAN-by-IP** — WebGPU requires a secure context (`https://`, `http://localhost`, or `file://`); a plain `http://<lan-ip>:5173` URL doesn't qualify in any browser and fails with a misleading "WebGPU is not available" rather than an obvious HTTPS error. See D11 in `docs/design/02-decisions.md`. Actual setup: `tailscale serve` fronting the Vite dev server on the Ubuntu server (`milliwaysserver`), reachable at `https://<tailnet-host>:8443/` from any device on the tailnet (the iPad is joined). Faster than pushing to GitHub Pages each iteration, same as originally intended — just over Tailscale instead of raw LAN.
+- iOS Safari Web Inspector needs macOS. In-page diagnostics (eruda, plus a custom on-screen FPS/error HUD) are built into the app itself from M0 onward — see `src/diagnostics/`. `ios-webkit-debug-proxy` remains an option when real DevTools are needed.
 - GitHub Pages serves the stable build. Repo must stay public for Pages on a free account.

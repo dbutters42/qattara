@@ -56,6 +56,13 @@ Dane's request. Three solid materials total:
 - iOS Safari Web Inspector requires macOS, but remote debugging is possible from Windows/Linux via `ios-webkit-debug-proxy` (open source) or Inspect.dev (paid). Plan for an in-page console overlay (eruda/vconsole) as the low-friction default.
 - The Ubuntu server is an asset: serve dev builds over LAN and load them on the iPad by IP. Faster than pushing to GitHub Pages each iteration.
 
+### D11 — Dev workflow: Tailscale Serve over HTTPS, not plain LAN-by-IP *(2026-08-25)*
+The workflow assumed in this file and in `04-m0-brief.md` — serve the Vite dev build from the Ubuntu server and open it on the iPad by LAN IP — doesn't work for WebGPU. `navigator.gpu` only exists in a secure context (`https://`, `http://localhost`, or `file://`); a plain `http://192.168.1.18:5173` LAN address doesn't qualify in any browser, regardless of iPadOS/Safari support, and unlike Chrome, Safari has no dev flag to override it. This wasn't discovered until M0 was actually tested on-device.
+
+**Actual working setup:** `tailscale serve` fronting the Vite dev server with a real trusted cert, at `https://<tailnet-host>:8443/` (the iPad needs to be on the same tailnet — it is). Port 443 specifically doesn't work for this on milliwaysserver, because Pi-hole's own webserver already claims it; 8443 is used instead. `claudeai` is the Tailscale operator on that box so this can be reconfigured without sudo. Full detail is in that server's own CLAUDE.md, not repeated here.
+
+**Practical effect:** any future from-scratch dev session on a new device needs this HTTPS setup before WebGPU will initialize at all — plain LAN-by-IP will silently fail with "WebGPU is not available," which looks like a device/OS support problem but isn't.
+
 ---
 
 ## 2. Parked
