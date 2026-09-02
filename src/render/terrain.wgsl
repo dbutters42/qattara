@@ -3,14 +3,21 @@ struct Uniforms {
   // xyz = directional light vector (toward the light), w unused.
   lightDir: vec4<f32>,
   // x/y = world-space distance between adjacent height-field texels
-  // (column/row), z = max soil depth (for material-fraction debug colouring), w unused.
+  // (column/row), z = max soil depth (for material-fraction colouring), w unused.
   worldStep: vec4<f32>,
+  // Hypsometric relief tint (src/render/reliefTheme.ts):
+  //   x = sea level (world height), y = belowSpan, z = aboveSpan,
+  //   w = materialMix (0 = pure elevation tint .. 1 = pure material colour).
+  relief: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var heightTex: texture_2d<f32>;
 @group(0) @binding(2) var earthTex: texture_2d<f32>;
 @group(0) @binding(3) var sandTex: texture_2d<f32>;
+// 1-D elevation → colour lookup, baked from the active ReliefTheme. Sea level
+// is the boundary between the two halves; see buildReliefLUT for the mapping.
+@group(0) @binding(4) var reliefLut: texture_2d<f32>;
 
 struct VertexOutput {
   @builtin(position) clipPos: vec4<f32>,
@@ -60,12 +67,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let diffuse = max(dot(normal, lightDir), 0.0);
   let ambient = 0.3;
 
-  // TEMPORARY debug material colouring — not the real M5 shading (relief
-  // shading/AO/material texturing comes later). Just enough to see whether
-  // generation-time slope/elevation placement is doing something sensible.
-  // rock isn't a clean 0..1 fraction (it's a bedrock *height*, can be any
-  // sign/magnitude) — but earth+sand are clean small depths, so rock's share
-  // is recovered as "whatever fraction of maxSoilDepth isn't soil".
+  // --- material colour (rock / earth / sand exposed at this cell) ---------
+  // rock isn't a clean 0..1 fraction (it's a bedrock *height*, any sign or
+  // magnitude) — but earth+sand are clean small depths, so rock's share is
+  // "whatever fraction of maxSoilDepth isn't soil".
   let maxSoilDepth = uniforms.worldStep.z;
   let earthDepth = textureLoad(earthTex, base, 0).r;
   let sandDepth = textureLoad(sandTex, base, 0).r;
@@ -77,8 +82,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
   let earthColor = vec3<f32>(0.45, 0.33, 0.2);
   let sandColor = vec3<f32>(0.76, 0.7, 0.5);
   let soilColor = mix(earthColor, sandColor, sandFracOfSoil);
-  let baseColor = mix(soilColor, rockColor, rockFrac);
+  let materialColor = mix(soilColor, rockColor, rockFrac);
 
+  // --- hypsometric relief tint ------------------------------------------
+  // Map this cell's height to a texel in the 1-D relief LUT, using the same
+  // sea-level-on-the-half-boundary convention as buildReliefLUT.
+  let hC = textureLoad(heightTex, base, 0).r;
+  let seaLevel = uniforms.relief.x;
+  let lutW = i32(textureDimensions(reliefLut).x);
+  let lutHalf = lutW / 2;
+  var lutX: i32;
+  if (hC < seaLevel) {
+    let u = clamp((seaLevel - hC) / max(uniforms.relief.y, 0.001), 0.0, 1.0); // 0 at sea, 1 deepest
+    lutX = (lutHalf - 1) - i32(round(u * f32(lutHalf - 1)));
+  } else {
+    let u = clamp((hC - seaLevel) / max(uniforms.relief.z, 0.001), 0.0, 1.0); // 0 at sea, 1 highest
+    lutX = lutHalf + i32(round(u * f32(lutHalf - 1)));
+  }
+  lutX = clamp(lutX, 0, lutW - 1);
+  let hypsoColor = textureLoad(reliefLut, vec2<i32>(lutX, 0), 0).rgb;
+
+  let baseColor = mix(hypsoColor, materialColor, uniforms.relief.w);
   let color = baseColor * (ambient + diffuse * 0.75);
   return vec4<f32>(color, 1.0);
 }

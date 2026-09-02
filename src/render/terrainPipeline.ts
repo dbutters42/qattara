@@ -2,16 +2,22 @@ import shaderSrc from './terrain.wgsl?raw';
 import type { HexMesh } from './mesh';
 import type { GpuContext } from './webgpu';
 import type { BoundingBox } from '../interaction/brush';
+import { buildReliefLUT, type ReliefTheme } from './reliefTheme';
+
+const RELIEF_LUT_WIDTH = 512;
 
 export interface TerrainPipeline {
   heightTexture: GPUTexture;
   vertexBuffer: GPUBuffer;
   indexBuffer: GPUBuffer;
-  updateUniforms(viewProj: Float32Array, lightDir: [number, number, number]): void;
+  /** `seaLevel` is the current generator water level — the hinge of the hypsometric ramp. */
+  updateUniforms(viewProj: Float32Array, lightDir: [number, number, number], seaLevel: number): void;
   /** Re-uploads generated data in place — no pipeline/texture recreation, matching "editing the world is a texture write". */
   updateTerrainData(heightData: Float32Array, earthData: Float32Array, sandData: Float32Array, maxSoilDepth: number): void;
   /** Re-uploads just a sub-rectangle — brush edits touch a small area many times a second; a full-field write would be wasteful. */
   updateTerrainRegion(box: BoundingBox, heightData: Float32Array, earthData: Float32Array, sandData: Float32Array): void;
+  /** Swap the hypsometric palette at runtime — rebakes the LUT and updates the span/mix uniforms. The hook for a future theme picker. */
+  setReliefTheme(theme: ReliefTheme): void;
   draw(pass: GPURenderPassEncoder): void;
 }
 
@@ -23,7 +29,8 @@ export function createTerrainPipeline(
   sandData: Float32Array,
   maxSoilDepth: number,
   fieldCols: number,
-  fieldRows: number
+  fieldRows: number,
+  reliefTheme: ReliefTheme
 ): TerrainPipeline {
   const { device, format } = gpu;
 
@@ -76,20 +83,39 @@ export function createTerrainPipeline(
   const earthTexture = uploadR32Float(earthData);
   const sandTexture = uploadR32Float(sandData);
 
+  // 1-D hypsometric colour LUT (src/render/reliefTheme.ts). rgba8unorm so it's
+  // a normal filterable/loadable texture — no float32 feature question — but
+  // the shader only textureLoad()s exact texels, no interpolation.
+  const reliefLutTexture = device.createTexture({
+    size: { width: RELIEF_LUT_WIDTH, height: 1 },
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  function writeReliefLut(theme: ReliefTheme): void {
+    device.queue.writeTexture(
+      { texture: reliefLutTexture },
+      buildReliefLUT(theme, RELIEF_LUT_WIDTH) as Uint8Array<ArrayBuffer>,
+      { bytesPerRow: RELIEF_LUT_WIDTH * 4, rowsPerImage: 1 },
+      { width: RELIEF_LUT_WIDTH, height: 1 }
+    );
+  }
+  writeReliefLut(reliefTheme);
+
   const uniformBuffer = device.createBuffer({
-    size: 96, // mat4x4 viewProj (64) + lightDir vec4 (16) + worldStep/maxSoilDepth vec4 (16)
+    size: 112, // viewProj (64) + lightDir vec4 (16) + worldStep vec4 (16) + relief vec4 (16)
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
-  // unfilterable-float on all three: we only ever textureLoad (exact texel
-  // fetch), never sample — sidesteps the float32-filterable optional-feature
-  // question entirely.
+  // unfilterable-float on the three heightfield textures: we only ever
+  // textureLoad (exact texel fetch), never sample — sidesteps the
+  // float32-filterable optional-feature question. The relief LUT is rgba8.
   const bindGroupLayout = device.createBindGroupLayout({
     entries: [
       { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
     ],
   });
 
@@ -100,6 +126,7 @@ export function createTerrainPipeline(
       { binding: 1, resource: heightTexture.createView() },
       { binding: 2, resource: earthTexture.createView() },
       { binding: 3, resource: sandTexture.createView() },
+      { binding: 4, resource: reliefLutTexture.createView() },
     ],
   });
 
@@ -138,17 +165,30 @@ export function createTerrainPipeline(
   });
 
   // Layout must match the WGSL struct exactly: viewProj (0-15), lightDir
-  // (16-19), worldStep.xy + maxSoilDepth in .z (20-23).
-  const uniformData = new Float32Array(24);
+  // (16-19), worldStep.xy + maxSoilDepth in .z (20-23), relief vec4 (24-27):
+  // seaLevel, belowSpan, aboveSpan, materialMix.
+  const uniformData = new Float32Array(28);
   uniformData[20] = mesh.worldStepX;
   uniformData[21] = mesh.worldStepZ;
   uniformData[22] = maxSoilDepth;
+  uniformData[25] = reliefTheme.belowSpan;
+  uniformData[26] = reliefTheme.aboveSpan;
+  uniformData[27] = reliefTheme.materialMix;
 
-  function updateUniforms(viewProj: Float32Array, lightDir: [number, number, number]): void {
+  function updateUniforms(viewProj: Float32Array, lightDir: [number, number, number], seaLevel: number): void {
     uniformData.set(viewProj, 0);
     uniformData[16] = lightDir[0];
     uniformData[17] = lightDir[1];
     uniformData[18] = lightDir[2];
+    uniformData[24] = seaLevel;
+    device.queue.writeBuffer(uniformBuffer, 0, uniformData);
+  }
+
+  function setReliefTheme(theme: ReliefTheme): void {
+    writeReliefLut(theme);
+    uniformData[25] = theme.belowSpan;
+    uniformData[26] = theme.aboveSpan;
+    uniformData[27] = theme.materialMix;
     device.queue.writeBuffer(uniformBuffer, 0, uniformData);
   }
 
@@ -183,5 +223,5 @@ export function createTerrainPipeline(
     pass.drawIndexed(mesh.indices.length);
   }
 
-  return { heightTexture, vertexBuffer, indexBuffer, updateUniforms, updateTerrainData, updateTerrainRegion, draw };
+  return { heightTexture, vertexBuffer, indexBuffer, updateUniforms, updateTerrainData, updateTerrainRegion, setReliefTheme, draw };
 }
