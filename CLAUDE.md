@@ -20,8 +20,9 @@ Design context lives in `docs/design/`. Read it before writing code:
 | `docs/design/03-outline.md` | The design document: simulation, rendering, milestones, risks |
 | `docs/design/04-m0-brief.md` | M0 milestone brief (complete) |
 | `docs/design/05-m3-brief.md` | M3 milestone brief (complete — D15) |
+| `docs/design/06-m4-brief.md` | M4 milestone brief — **the current milestone**, in detail |
 
-M0–M3 are done; **M4 (hydraulic erosion) is next** and has no brief yet. See `00-state.md` §4.
+M0–M3 are done; **M4 (hydraulic erosion) is next**. See `00-state.md` §4.
 
 Keep these current. When a decision gets made, append it to `02-decisions.md` with a date and the reasoning. When the project state changes, update `00-state.md`. These files are the memory — a session that starts cold reads them and knows where things are.
 

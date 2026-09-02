@@ -1,7 +1,7 @@
 # 00 — STATE (read this first)
 
 **Project: Qattara** — working title.
-**Last updated:** 2026-09-02 (M0–M3 complete — water sim verified on-device, D15; M5 hypsometric relief tint pulled forward and done, D16; all uncommitted. Next: M4 erosion.)
+**Last updated:** 2026-09-02 (M0–M3 complete — water sim verified on-device, D15; M5 hypsometric relief tint pulled forward and done, D16; all committed on `main`, unpushed. **Next: M4 erosion — brief drafted at `06-m4-brief.md`, not started.**)
 
 ---
 
@@ -20,6 +20,7 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 | M1 | **Complete.** Procedural generator with player-facing sliders (ruggedness, depth/elevation range, rockiness, sand reach, water level) plus New Seed/Random/Flat presets. See D13. |
 | M2 | **Complete.** Touch picking, six brush tools (Raise/Lower/Level/Fill to Level/Smooth/Ruggedize), Materials selector, undo, terrain-conforming cursor ring, collapsible tools panel — all working on-device. See D14. Smooth/Ruggedize's interaction model is still flagged for revisit (P5) but the milestone is done. |
 | M3 | **Complete** — `05-m3-brief.md`. Virtual-pipes water sim (3 compute passes/tick, hex neighbour arithmetic in `src/hex/coords.ts` + `src/sim/water.wgsl`), water GPU-authoritative, 30 Hz fixed-timestep accumulator, volume/min/max-depth readback in the HUD. Tuning settled as **D15**: `FLOW_STRENGTH` ×8 kept, `FLUX_DAMPING` tried and removed (it stalled flow through connected pools). All §3 criteria met on-device: damming + flow + connected-pool levelling via `?demo=dam`; conservation/stability via debug `?rain=`/`?evap=` params (rain-off/evap-off → vol constant to float precision; rain-on/evap-off → linear vol, no negatives, 60 fps). Only unverified: iPhone ≥30 fps with the sim (low risk). No erosion — that's M4. |
+| M4 | **Not started** — `06-m4-brief.md` (drafted 2026-09-02). Erosion / deposition, two-channel sediment transport, thermal slumping on top of the M3 pipe model. Completes the D15 authority shift (terrain → GPU-authoritative; **D17** pending). Mostly parameter tuning — a live dev panel is in scope from the first slice. |
 | Code | Vite + TypeScript + WebGPU scaffold in `~/projects/qattara` on milliwaysserver. Hex coordinate helpers (tested), hex mesh + procedural terrain generator (tested), displacement/lighting shader, touch orbit camera, brush editing + tool/material UI, undo, GPU water simulation (`src/sim/`), on-device diagnostics overlay. |
 
 ## 3. The decisions that matter most
@@ -33,17 +34,17 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 - No Mac — Windows plus an Ubuntu server. Web is effectively the only iOS path.
 - Claude prototypes the engine and sim; Dane owns and tunes the gameplay code.
 
-## 4. Immediate next action
+## 4. Immediate next action — START HERE
 
-**M4 — hydraulic erosion.** The next milestone (`03-outline.md` M4 row): sediment capacity / dissolution / deposition / advection / thermal slumping passes on top of the M3 pipe model, and this is where the parameter-tuning work lives. Reads: `03-outline.md` §3 (passes 4–7), D15 (the terrain→GPU-authoritative shift erosion forces), D12 (neighbour-parity — will bite erosion flux the same way), the Mei et al. paper. Erosion changes the bed under the water, so `FLOW_STRENGTH` will want re-tuning then.
+**Begin M4 (hydraulic erosion).** The brief is written: `06-m4-brief.md` — read it first, especially §4.1 (terrain becomes GPU-authoritative: sim owns `rock`/`earth`/`sand` buffers, writes the height texture each tick) and §3 (success criteria). Dane has seen the outline and is broadly OK with it but hasn't line-by-line reviewed — expect small adjustments.
 
-**Before M4, worth doing:** commit the working tree (see below), and if convenient a quick iPhone check that the M3 sim holds ≥30 fps (the one unverified §3 target).
+**First engine slice:** passes 4 + 5 only — erosion/deposition (`C = Kc·sin(tilt)·|v|`, sand taken before earth, the §4.4 clamps) and flux-based sediment advection — with the **total-solid-mass conservation readout** in the HUD from the first commit (it's to M4 what water-volume conservation was to M3). Hold thermal slumping (pass 7) and the `?demo=erode` scenario until that slice is stable. Build the **dev tuning panel** alongside it, not after (risk register: erosion-param interaction is "High").
 
-**Uncommitted (2026-09-02) — one working tree, three efforts:**
-- **M3 done:** `?demo=dam` scenario + `?rain=`/`?evap=` debug params in `main.ts`; `springs` option, `FLUX_DAMPING`→1.0, min-depth stat in `waterSim.ts`; HUD scenario + `depth min..max` lines.
-- **M5 relief tint (D16):** `reliefTheme.ts` (+test), `terrain.wgsl`, `terrainPipeline.ts`, `main.ts` light angle + LUT wiring.
-- **Docs:** this file, `02-decisions.md` (D15, D16, P4 resolved, P6 filed), `05-m3-brief.md`, `CLAUDE.md`.
-- Not committed. A three-commit split (M3 / relief / docs) makes sense whenever Dane wants it.
+Reuse `storageNeighborIndex` / the `water.wgsl` neighbour arithmetic for the tilt gradient — **do not rederive** (D12, fourth time it would bite).
+
+**Also outstanding:** a quick iPhone check that the M3 sim holds ≥30 fps (the one unverified M3 §3 target — low risk; fold into M4's iPhone testing).
+
+**Repo state:** `main`, unpushed, 10 ahead of origin. Session commits: `b2a5ea6` M3 demo + debug water controls + FLUX_DAMPING removal · `ac0a997` M5 relief tint · `21fd018` docs close-out · plus a final docs commit with `06-m4-brief.md`. Working tree clean. `npx tsc --noEmit` clean, 29 tests pass.
 
 **Done (2026-09-02):**
 - **M2 complete** — collapsible tools panel (`src/ui/toolbar.ts`), real deselect path, verified on-device.

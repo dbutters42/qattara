@@ -122,7 +122,7 @@ Recommended counterforces:
 | M1 | Procedural terrain generation, with player-facing inputs | The world is worth looking at | ~1 week |
 | M2 | Brush editing — raise, lower, paint sand / earth / rock | **It becomes a toy** | ~1 week |
 | M3 | Water — rain, springs, pipe-model flow, evaporation | Water pools, flows, can be dammed | ~2 weeks |
-| M4 | Erosion, two-channel sediment transport, thermal slumping | Rivers carve channels and build deltas | 2-4 weeks, mostly tuning |
+| M4 | Erosion, two-channel sediment transport, thermal slumping | Rivers carve channels and build deltas | 2-4 weeks, mostly tuning — brief: `06-m4-brief.md` |
 | M5 | Looks — relief shading, AO, water shading, material colour | It stops looking like a tech demo | open-ended |
 | M6 | Save/load, ambient catch-up sim, uplift | It becomes a place you return to | ~1 week |
 | M7 | Capacitor wrap for the App Store | Only if earned; needs a cloud macOS runner | later |
