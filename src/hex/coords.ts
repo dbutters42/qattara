@@ -34,6 +34,44 @@ export function storageIndex(a: Axial, width: number): number {
   return a.r * width + storageCol(a);
 }
 
+// Neighbour lookup done entirely in *storage space* (col, row) — the form a
+// compute shader has its cell index in — returning the flat storage index of
+// the neighbour in `direction`, or -1 if that neighbour is off the field.
+//
+// This is the row-parity-correct version of "the cell one step away": the
+// stagger between rows means a fixed (col, row±1) offset lands on a genuine
+// hex neighbour for one row parity and a diagonal non-neighbour for the
+// other (D12 in docs/design — this bug has bitten mesh, shading, and the
+// generator already). The fix is to drop back to axial for the step:
+//   q = col - floor(row/2);  step in axial;  recombine col = q + floor(row/2).
+//
+// The arithmetic here is deliberately simple (integer ops, no negatives once
+// the row bound is checked) so the *identical* expression can be ported to
+// WGSL for the M3 water sim's flux passes.
+export function storageNeighborIndex(
+  col: number,
+  row: number,
+  direction: number,
+  fieldCols: number,
+  fieldRows: number
+): number {
+  const d = AXIAL_DIRECTIONS[((direction % 6) + 6) % 6]!;
+  const q = col - Math.floor(row / 2);
+  const nr = row + d.r;
+  if (nr < 0 || nr >= fieldRows) return -1;
+  const ncol = q + d.q + Math.floor(nr / 2);
+  if (ncol < 0 || ncol >= fieldCols) return -1;
+  return nr * fieldCols + ncol;
+}
+
+// Given the AXIAL_DIRECTIONS ordering, the neighbour in `direction` sees this
+// cell in `(direction + 3) % 6` — used to read a neighbour's outflow toward
+// us as our inflow. (Verified by AXIAL_DIRECTIONS' own test: dir i and dir
+// i+3 sum to zero.)
+export function oppositeDirection(direction: number): number {
+  return (((direction % 6) + 6) % 6 + 3) % 6;
+}
+
 // Axial -> world position, pointy-top layout. `size` is the hex's
 // centre-to-corner radius.
 export function axialToWorld(a: Axial, size: number): { x: number; y: number } {

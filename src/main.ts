@@ -7,13 +7,14 @@ import { createWaterPipeline } from './render/waterPipeline';
 import { createFrameRenderer } from './render/frame';
 import { createCursorPipeline, CURSOR_RING_SEGMENTS } from './render/cursorPipeline';
 import { sampleHeightField } from './terrain/sample';
-import { generateTerrain, floodFillWater, type TerrainGenParams } from './terrain/generator';
+import { generateTerrain, type TerrainGenParams } from './terrain/generator';
 import { OrbitCamera } from './camera/orbitCamera';
 import { createControlPanel } from './ui/controls';
 import { createToolbar } from './ui/toolbar';
 import { pickTerrain } from './interaction/picking';
 import { applyBrush, type ToolId, type MaterialArrays } from './interaction/brush';
 import { createUndoStack } from './interaction/undoStack';
+import { createWaterSim } from './sim/waterSim';
 
 const FIELD_SIZE = 1024;
 const MESH_SIZE = 512;
@@ -97,13 +98,23 @@ async function main() {
     FIELD_SIZE,
     FIELD_SIZE
   );
+  // M3: water is now a GPU compute simulation, seeded once from the
+  // generator's flood-fill and GPU-authoritative from here (brief §4.1).
+  const sim = createWaterSim(gpu, {
+    fieldCols: FIELD_SIZE,
+    fieldRows: FIELD_SIZE,
+    hexSize: HEX_SIZE,
+    heightTexture: terrain.heightTexture,
+    initialWater: terrainData.water,
+  });
   const water = createWaterPipeline(
     gpu,
     mesh,
     terrain.vertexBuffer,
     terrain.indexBuffer,
     terrain.heightTexture,
-    terrainData.water,
+    sim.waterBufferA,
+    sim.waterBufferB,
     FIELD_SIZE,
     FIELD_SIZE
   );
@@ -117,7 +128,7 @@ async function main() {
     currentSurfaceHeight = generated.surfaceHeight;
     currentTerrainData = generated.terrainData;
     terrain.updateTerrainData(generated.surfaceHeight, generated.terrainData.earth, generated.terrainData.sand, newParams.maxSoilDepth);
-    water.updateWaterData(generated.terrainData.water);
+    sim.resetWater(generated.terrainData.water); // new terrain, restart the sim's water field from its flood fill
     undoStack.clear(); // old snapshots belong to a terrain that no longer exists
     toolbar.setUndoEnabled(false);
   });
@@ -155,9 +166,10 @@ async function main() {
       for (let i = 0; i < currentSurfaceHeight.length; i++) {
         currentSurfaceHeight[i] = snapshot.rock[i]! + snapshot.earth[i]! + snapshot.sand[i]!;
       }
-      const waterDepth = floodFillWater(currentSurfaceHeight, FIELD_SIZE, FIELD_SIZE, TERRAIN_PARAMS.waterLevel);
       terrain.updateTerrainData(currentSurfaceHeight, snapshot.earth, snapshot.sand, TERRAIN_PARAMS.maxSoilDepth);
-      water.updateWaterData(waterDepth);
+      // Water is sim-owned now (brief §4.1). It keeps flowing over whatever
+      // terrain exists and reads the height texture live, so the reverted
+      // terrain simply takes effect on the next tick — undo doesn't touch it.
       toolbar.setUndoEnabled(undoStack.canUndo());
     }
   );
@@ -281,7 +293,59 @@ async function main() {
     }
   }
 
+  // The water sim runs on a fixed 30 Hz clock, decoupled from the render
+  // frame rate (outline §3 / brief §4.6). Accumulate real elapsed time, spend
+  // it in whole ticks, and cap the catch-up so a backgrounded tab coming back
+  // doesn't trigger a huge stall.
+  const SIM_TICK_HZ = 30;
+  const SIM_TICK_DT = 1 / SIM_TICK_HZ;
+  const MAX_STEPS_PER_FRAME = 5;
+  let simAccumulator = 0;
+  let lastSimClock = performance.now();
+  let ticksSinceStatsRequest = 0;
+  let ticksThisSecond = 0;
+  let ticksPerSecond = 0;
+  let statsSecondClock = performance.now();
+  let lastVolume = 0;
+  let lastMaxDepth = 0;
+
+  function stepSim(): void {
+    const now = performance.now();
+    simAccumulator += Math.min((now - lastSimClock) / 1000, 0.25);
+    lastSimClock = now;
+
+    let steps = 0;
+    while (simAccumulator >= SIM_TICK_DT && steps < MAX_STEPS_PER_FRAME) {
+      sim.step(SIM_TICK_DT);
+      simAccumulator -= SIM_TICK_DT;
+      steps++;
+      ticksSinceStatsRequest++;
+      ticksThisSecond++;
+    }
+    if (steps === MAX_STEPS_PER_FRAME) simAccumulator = 0; // maxed out — shed the backlog, let sim time slip
+
+    if (steps > 0) water.setWaterBufferIndex(sim.currentWaterIndex());
+
+    if (now - statsSecondClock >= 1000) {
+      ticksPerSecond = ticksThisSecond;
+      ticksThisSecond = 0;
+      statsSecondClock = now;
+    }
+    if (ticksSinceStatsRequest >= 30) {
+      ticksSinceStatsRequest = 0;
+      sim.requestStats((s) => {
+        lastVolume = s.totalVolume;
+        lastMaxDepth = s.maxDepth;
+      });
+    }
+    diagnostics.setSimStats(
+      `water: vol ${lastVolume.toFixed(0)} | max depth ${lastMaxDepth.toFixed(2)} | ${ticksPerSecond}/s`
+    );
+  }
+
   function tick() {
+    stepSim();
+
     const aspect = gpu!.canvas.width / gpu!.canvas.height;
     const viewProj = camera.viewProjection(aspect);
     terrain.updateUniforms(viewProj, lightDir);

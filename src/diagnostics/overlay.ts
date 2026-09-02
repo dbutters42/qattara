@@ -7,6 +7,7 @@ const MAX_LOG_LINES = 40;
 export class DiagnosticsOverlay {
   private root: HTMLDivElement;
   private statsEl: HTMLDivElement;
+  private simEl: HTMLDivElement;
   private deviceEl: HTMLDivElement;
   private logEl: HTMLDivElement;
   private fatalEl: HTMLDivElement;
@@ -26,12 +27,15 @@ export class DiagnosticsOverlay {
     `;
 
     this.statsEl = document.createElement('div');
+    this.simEl = document.createElement('div');
+    this.simEl.style.cssText = 'color: #9cf;';
     this.deviceEl = document.createElement('div');
     this.deviceEl.style.cssText = 'color: #6cf; margin-top: 4px;';
     this.logEl = document.createElement('div');
     this.logEl.style.cssText = 'color: #f66; margin-top: 4px;';
 
     this.root.appendChild(this.statsEl);
+    this.root.appendChild(this.simEl);
     this.root.appendChild(this.deviceEl);
     this.root.appendChild(this.logEl);
     document.body.appendChild(this.root);
@@ -56,6 +60,13 @@ export class DiagnosticsOverlay {
 
   setDeviceInfo(lines: string[]): void {
     this.deviceEl.textContent = lines.join('\n');
+  }
+
+  // M3 water-sim readout: total volume, peak depth, tick rate. The volume
+  // number is the conservation check — with rain off it should hold steady,
+  // with rain on and evaporation off it should climb linearly.
+  setSimStats(text: string): void {
+    this.simEl.textContent = text;
   }
 
   recordFrame(): void {
