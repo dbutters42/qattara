@@ -25,7 +25,7 @@ struct Params {
   fieldCols: u32,
   fieldRows: u32,
   springCount: u32,
-  _pad0: u32,
+  fluxDamping: f32,    // per-tick multiplier on against-gradient (sloshing) flux only, <1 — see cs_flux
 
   // (col, row, ratePerSecond, _) — hardcoded test sources for M3.
   springs: array<vec4<f32>, 8>,
@@ -119,7 +119,13 @@ fn cs_flux(@builtin(global_invocation_id) gid: vec3<u32>) {
     let t = texelOf(ni);
     let nSurf = textureLoad(heightTex, t, 0).r + waterSrc[ni];
     let dh = surfHere - nSurf;
-    let f = max(0.0, flux[i * 6u + d] + params.dt * params.gravity * params.pipeArea * dh / params.pipeLength);
+    // Directional damping: a pipe flowing downhill (dh > 0) carries its
+    // accumulated flux forward undamped, so the inrush keeps its speed. A
+    // pipe still pushing toward a now-higher surface (dh <= 0) is slosh
+    // momentum overshooting equilibrium — bleed it hard so the water settles
+    // instead of rocking back and forth.
+    let damp = select(1.0, params.fluxDamping, dh <= 0.0);
+    let f = max(0.0, damp * flux[i * 6u + d] + params.dt * params.gravity * params.pipeArea * dh / params.pipeLength);
     newF[d] = f;
     totalOutRate = totalOutRate + f;
   }

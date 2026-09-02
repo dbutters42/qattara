@@ -47,6 +47,21 @@ const DEFAULT_RAIN_RATE = 0.03; // depth/sec added everywhere
 const DEFAULT_EVAP_RATE = 0.012; // fraction of depth/sec
 const SPRING_RATE = 3.0; // depth/sec injected at the single hardcoded test spring
 
+// Master "how fast does water accelerate downhill" knob. Nominally the
+// virtual pipe's cross-sectional area (geometrically ~hexSize²), but that
+// value flows like syrup on gentle slopes — the flux takes a second-plus of
+// sim time to spin up. This multiplies it. Raise for faster/looser flow;
+// lower it (or add flux damping) if water starts sloshing back and forth.
+const FLOW_STRENGTH = 8;
+
+// Per-tick multiplier on accumulated flux, applied ONLY to pipes pushing
+// against the surface gradient (dh <= 0) — that's slosh momentum overshooting
+// equilibrium. Downhill pipes are left undamped so the inrush keeps its
+// speed. See the directional-damping block in cs_flux. 1.0 = no damping
+// (original Mei et al.); lower = firmer. At 30 Hz, 0.98 retains ~55% of that
+// residual flux per second, 0.95 ~21%, 0.9 ~4%.
+const FLUX_DAMPING = 0.9;
+
 export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim {
   const { device } = gpu;
   const { fieldCols, fieldRows, hexSize, heightTexture, initialWater } = opts;
@@ -54,7 +69,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
 
   const pipeLength = Math.sqrt(3) * hexSize;
   const cellArea = ((3 * Math.sqrt(3)) / 2) * hexSize * hexSize;
-  const pipeArea = hexSize * hexSize;
+  const pipeArea = hexSize * hexSize * FLOW_STRENGTH;
 
   // --- buffers ---------------------------------------------------------------
   const makeStorage = (elems: number, extraUsage = 0) =>
@@ -77,7 +92,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
   // Layout must match `struct Params` in water.wgsl exactly (176 bytes):
   //   f32 dt, rainRate, rainEnabled, evapRate,
   //   f32 gravity, pipeArea, pipeLength, cellArea,
-  //   u32 fieldCols, fieldRows, springCount, _pad,
+  //   u32 fieldCols, fieldRows, springCount; f32 fluxDamping,
   //   vec4<f32> springs[8]   (col, row, ratePerSec, _)
   const paramsBytes = new ArrayBuffer(176);
   const pf = new Float32Array(paramsBytes);
@@ -88,6 +103,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
   pf[7] = cellArea;
   pu[8] = fieldCols;
   pu[9] = fieldRows;
+  pf[11] = FLUX_DAMPING;
 
   let rainEnabled = true;
   let rainRate = DEFAULT_RAIN_RATE;
