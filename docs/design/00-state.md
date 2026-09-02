@@ -1,7 +1,7 @@
 # 00 — STATE (read this first)
 
 **Project: Qattara** — working title.
-**Last updated:** 2026-09-02 (M0 and M1 complete; M2 in progress — collapsible panel item done)
+**Last updated:** 2026-09-02 (M0–M3 complete — water sim verified on-device, D15; M5 hypsometric relief tint pulled forward and done, D16; all uncommitted. Next: M4 erosion.)
 
 ---
 
@@ -14,12 +14,13 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 | Item | Status |
 | --- | --- |
 | Brief and name | `01-brief.md` |
-| Decisions D1–D14 | Settled — `02-decisions.md` |
+| Decisions D1–D16 | Settled — `02-decisions.md`. |
 | Design outline | Complete — `03-outline.md` |
 | M0 | **Complete** — `04-m0-brief.md`. Go/no-go passed: 60fps on both iPad and iPhone with real geometry. |
 | M1 | **Complete.** Procedural generator with player-facing sliders (ruggedness, depth/elevation range, rockiness, sand reach, water level) plus New Seed/Random/Flat presets. See D13. |
-| M2 | **In progress.** Touch picking, six brush tools (Raise/Lower/Level/Fill to Level/Smooth/Ruggedize), Materials selector, undo, terrain-conforming cursor ring — all working. See D14. Not yet done: no water simulation to actually respond to brush edits (that's M3), and Smooth/Ruggedize's interaction model is flagged for revisit (P5). |
-| Code | Vite + TypeScript + WebGPU scaffold in `~/projects/qattara` on milliwaysserver. Hex coordinate helpers (tested), hex mesh + procedural terrain generator (tested), displacement/lighting shader, touch orbit camera, brush editing + tool/material UI, undo, on-device diagnostics overlay. |
+| M2 | **Complete.** Touch picking, six brush tools (Raise/Lower/Level/Fill to Level/Smooth/Ruggedize), Materials selector, undo, terrain-conforming cursor ring, collapsible tools panel — all working on-device. See D14. Smooth/Ruggedize's interaction model is still flagged for revisit (P5) but the milestone is done. |
+| M3 | **Complete** — `05-m3-brief.md`. Virtual-pipes water sim (3 compute passes/tick, hex neighbour arithmetic in `src/hex/coords.ts` + `src/sim/water.wgsl`), water GPU-authoritative, 30 Hz fixed-timestep accumulator, volume/min/max-depth readback in the HUD. Tuning settled as **D15**: `FLOW_STRENGTH` ×8 kept, `FLUX_DAMPING` tried and removed (it stalled flow through connected pools). All §3 criteria met on-device: damming + flow + connected-pool levelling via `?demo=dam`; conservation/stability via debug `?rain=`/`?evap=` params (rain-off/evap-off → vol constant to float precision; rain-on/evap-off → linear vol, no negatives, 60 fps). Only unverified: iPhone ≥30 fps with the sim (low risk). No erosion — that's M4. |
+| Code | Vite + TypeScript + WebGPU scaffold in `~/projects/qattara` on milliwaysserver. Hex coordinate helpers (tested), hex mesh + procedural terrain generator (tested), displacement/lighting shader, touch orbit camera, brush editing + tool/material UI, undo, GPU water simulation (`src/sim/`), on-device diagnostics overlay. |
 
 ## 3. The decisions that matter most
 
@@ -34,15 +35,28 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 
 ## 4. Immediate next action
 
-**M3 — water** (rain, springs, pipe-model flow, evaporation). This is Dane's stated priority and the next milestone. Brush edits currently don't affect the water at all — the water layer is a static flood-fill from generation (D13), nothing simulates it — so a freshly-raised dam holds nothing back. That gap closes with M3. Some water *rendering* scaffolding already exists (`src/render/water.wgsl`, `waterPipeline.ts`) from M2-era work; the simulation itself is unbuilt.
+**M4 — hydraulic erosion.** The next milestone (`03-outline.md` M4 row): sediment capacity / dissolution / deposition / advection / thermal slumping passes on top of the M3 pipe model, and this is where the parameter-tuning work lives. Reads: `03-outline.md` §3 (passes 4–7), D15 (the terrain→GPU-authoritative shift erosion forces), D12 (neighbour-parity — will bite erosion flux the same way), the Mei et al. paper. Erosion changes the bed under the water, so `FLOW_STRENGTH` will want re-tuning then.
 
-**Done (2026-09-02):** the tools/brush panel (`src/ui/toolbar.ts`) is now collapsible via a `Tools ▼`/`▲` toggle. Collapsing runs the real deselect path — `onToolChange(null)`, same as tapping the active tool button again — so touch returns to camera-only nav, `cursorPoint` clears, and Fill to Level's persisted reference resets; it's not a visual-only hide. Verified on-device by Dane.
+**Before M4, worth doing:** commit the working tree (see below), and if convenient a quick iPhone check that the M3 sim holds ≥30 fps (the one unverified §3 target).
+
+**Uncommitted (2026-09-02) — one working tree, three efforts:**
+- **M3 done:** `?demo=dam` scenario + `?rain=`/`?evap=` debug params in `main.ts`; `springs` option, `FLUX_DAMPING`→1.0, min-depth stat in `waterSim.ts`; HUD scenario + `depth min..max` lines.
+- **M5 relief tint (D16):** `reliefTheme.ts` (+test), `terrain.wgsl`, `terrainPipeline.ts`, `main.ts` light angle + LUT wiring.
+- **Docs:** this file, `02-decisions.md` (D15, D16, P4 resolved, P6 filed), `05-m3-brief.md`, `CLAUDE.md`.
+- Not committed. A three-commit split (M3 / relief / docs) makes sense whenever Dane wants it.
+
+**Done (2026-09-02):**
+- **M2 complete** — collapsible tools panel (`src/ui/toolbar.ts`), real deselect path, verified on-device.
+- **M3 complete (D15)** — virtual-pipes water sim; `FLOW_STRENGTH` kept, `FLUX_DAMPING` removed; damming + flow + conservation all verified on-device.
+- **M5 hypsometric relief tint (D16)** — pulled forward because flat-looking terrain was blocking M3 judgement; `CLASSIC_ATLAS` palette signed off; resolves P4.
 
 **Parked, do not forget:**
+- P6 — hypsometric tint currently colours everything below sea level blue, flooded or not. Consider tinting only the *actual* water extent (needs the GPU water buffer wired into the terrain pipeline with ping-pong bind groups — medium change), or marking the basin rim with a sea-level contour instead. Decide at M5, alongside contour lines.
 - P5 — Smooth/Ruggedize's once-per-cell-per-stroke interaction model works but isn't considered final; look for something better.
 - P3 — camera control inversion toggles (pan/tilt), once there's a settings surface to put them in.
-- P4 — visual indicator for dry land below water level, at M5 (relief shading).
+- ~~P4 — visual indicator for dry land below water level~~ RESOLVED by the hypsometric tint (§4): the ramp hinges at sea level, so below-sea-level ground is blue-tinted whether or not it's flooded.
 - P2 — salinity, a plausible post-v1 addition.
+- M5 also: contour-line toggle (quantitative elevation read, ~20 min), and the deferred AO / water shading / material texturing from `03-outline.md`.
 
 ## 5. History
 
@@ -52,4 +66,8 @@ M0 was built and passed go/no-go the same day (2026-08-25), in a separate sessio
 
 M1 (procedural terrain generation) was also built the same day, in a third session, iterating directly with Dane against the running app over Tailscale. Notable finds along the way: a real hex-grid neighbour-parity bug affecting the mesh, shading, and generator alike (D12 — will matter again for M4's erosion flux), and a noise-technique artifact in ridged noise fixed by per-octave rotation (also D12). The generator itself — region/macro noise layers, connectivity-based water, independent depth/elevation ranges — is D13.
 
-M2 (brush editing) was started the same day, in a fourth session, again iterating live against the running app. Six tools built (D14) plus undo and a terrain-conforming cursor ring, working well enough that Dane wanted to move on to water next, though he ran out of time this session. Paused mid-milestone, not completed — pick back up here rather than assuming M2 is finished.
+M2 (brush editing) was started the same day, in a fourth session, again iterating live against the running app. Six tools built (D14) plus undo and a terrain-conforming cursor ring. Finished 2026-09-02 with the collapsible tools panel; **M2 is complete.**
+
+M3 (water) — done 2026-09-02. Virtual-pipes sim on hex: three compute passes per tick, the Mei et al. stability clamp, row-parity-correct neighbour arithmetic shared between `hex/coords.ts` and `water.wgsl`, water GPU-authoritative, a 30 Hz fixed-timestep accumulator decoupled from rAF. Then a long live-tuning arc on the iPad, mostly against the `?demo=dam` scenario, that settled as **D15**: `FLOW_STRENGTH` ×8 kept (raw pipe area flows like syrup); `FLUX_DAMPING` added to fight sloshing then removed once it turned out to also stall flow through connected near-flat pools (distant reservoirs stopped filling, connected bodies wouldn't level off). The §3 conservation check passed on the default map via debug `?rain=`/`?evap=` params — vol constant to float precision with inputs off, linear with rain on, no negative depths.
+
+M5 relief tint (**D16**) was pulled forward mid-M3, because the sim's behaviour couldn't be judged against flat-looking terrain. A hypsometric elevation ramp (`CLASSIC_ATLAS`) baked to a LUT the shader samples, plus a raking-light drop. Structured as a data-only theme so accessibility / dark-light / contour variants are a later data change, not a shader rewrite. Immediately made a real M3 flow bug visible (the `FLUX_DAMPING` stall above). Resolves P4.

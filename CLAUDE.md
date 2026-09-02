@@ -16,9 +16,12 @@ Design context lives in `docs/design/`. Read it before writing code:
 | --- | --- |
 | `docs/design/00-state.md` | Where the project stands; read first |
 | `docs/design/01-brief.md` | Vision, name, goals, non-goals |
-| `docs/design/02-decisions.md` | Decision log D1–D10 with reasoning. Append, don't rewrite. |
+| `docs/design/02-decisions.md` | Decision log (D1 onward) with reasoning. Append, don't rewrite. |
 | `docs/design/03-outline.md` | The design document: simulation, rendering, milestones, risks |
-| `docs/design/04-m0-brief.md` | The current milestone, in detail |
+| `docs/design/04-m0-brief.md` | M0 milestone brief (complete) |
+| `docs/design/05-m3-brief.md` | M3 milestone brief (complete — D15) |
+
+M0–M3 are done; **M4 (hydraulic erosion) is next** and has no brief yet. See `00-state.md` §4.
 
 Keep these current. When a decision gets made, append it to `02-decisions.md` with a date and the reasoning. When the project state changes, update `00-state.md`. These files are the memory — a session that starts cold reads them and knows where things are.
 
@@ -45,7 +48,7 @@ Keep these current. When a decision gets made, append it to `02-decisions.md` wi
 
 ## Parked — do not forget
 
-Dane has specific ideas about **player-facing terrain-generation inputs**. Ask him for these at the start of M1, before designing the generator. Do not bolt them on afterward.
+Live parked items are tracked in `docs/design/02-decisions.md` §2 (P2–P5). The M1 terrain-generation-inputs item (P1) is resolved — see D13.
 
 ## Dev environment notes
 
