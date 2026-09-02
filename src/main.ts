@@ -3,6 +3,7 @@ import { initDeviceConsole } from './diagnostics/console';
 import { initWebGPU, describeAdapter, WebGPUUnsupportedError } from './render/webgpu';
 import { buildHexMesh } from './render/mesh';
 import { createTerrainPipeline } from './render/terrainPipeline';
+import { CLASSIC_ATLAS } from './render/reliefTheme';
 import { createWaterPipeline } from './render/waterPipeline';
 import { createFrameRenderer } from './render/frame';
 import { createCursorPipeline, CURSOR_RING_SEGMENTS } from './render/cursorPipeline';
@@ -20,7 +21,8 @@ const FIELD_SIZE = 1024;
 const MESH_SIZE = 512;
 const HEX_SIZE = 2; // world units (metres) per hex, centre-to-corner
 
-const TERRAIN_PARAMS: TerrainGenParams = {
+// The app's normal boot terrain.
+const DEFAULT_TERRAIN_PARAMS: TerrainGenParams = {
   width: FIELD_SIZE,
   height: FIELD_SIZE,
   seed: 1,
@@ -35,6 +37,50 @@ const TERRAIN_PARAMS: TerrainGenParams = {
   maxSoilDepth: 6,
   sandBand: 15,
 };
+
+// Repeatable M3 damming-demo scenario (docs/design/05-m3-brief.md §3.1),
+// opt-in via `?demo=dam` on the URL — NOT the default, because this terrain
+// is deliberately more rugged than the app should boot into. Seed 24's map
+// has a well-walled dry channel; the test spring below sits near its head.
+// The point is that "raise a ridge across a flowing channel, watch the water
+// back up" (brief §3, the headline criterion) is the *same* every run rather
+// than depending on where the generated map happens to have a valley. The
+// higher ruggedness / wider height ranges are what make the channel hold
+// water with a single brush stroke — the default terrain won't.
+const DAMMING_DEMO_PARAMS: Partial<TerrainGenParams> = {
+  seed: 24,
+  ruggedness: 0.75,
+  depthRange: 75,
+  elevationRange: 85,
+};
+
+// A point on the demo channel for seed 24 where it's well walled on both
+// sides (floor h~9, walls ~5 up at 4 and 8 cells out) — a few cells below
+// the actual channel head, whose far side is open. From here the channel
+// runs roughly east (+col), dropping to h~-10 at the natural dam point near
+// (row 163, col 195) and on to h~-46 past it. Drag a Raise ridge across the
+// channel around the dam point and the water pools behind it. 300 depth/s is
+// a watchable fill pace (verified stable on-device up to 1000). Demo runs
+// with rain AND evaporation off (below) — with evaporation on, a growing
+// wetted channel hits an evaporation-vs-throughflow equilibrium and the
+// front stalls partway; see D15.
+const DAMMING_DEMO_SPRING = { col: 181, row: 168, ratePerSecond: 300 } as const;
+
+const URL_PARAMS = new URLSearchParams(location.search);
+const DEMO_DAMMING = URL_PARAMS.get('demo') === 'dam';
+
+// Debug overrides for the M3 §3 conservation / stability check — there's no
+// player rain/evaporation UI yet (brief §2). `?rain=on|off` / `?evap=on|off`
+// force the sim's inputs after setup so the closed-domain volume behaviour
+// can be watched on the default map:
+//   ?rain=off&evap=off  → total volume dead flat
+//   ?rain=on&evap=off   → total volume grows linearly, nothing goes negative
+// Applied on top of whatever the scenario set (so `?demo=dam&rain=on` works).
+const RAIN_OVERRIDE = URL_PARAMS.get('rain'); // 'on' | 'off' | null
+const EVAP_OVERRIDE = URL_PARAMS.get('evap'); // 'on' | 'off' | null
+const TERRAIN_PARAMS: TerrainGenParams = DEMO_DAMMING
+  ? { ...DEFAULT_TERRAIN_PARAMS, ...DAMMING_DEMO_PARAMS }
+  : { ...DEFAULT_TERRAIN_PARAMS };
 
 // Diagnostics come up before anything else. On iPad there is no Web
 // Inspector without a Mac, so this overlay — not a debugger — is how a
@@ -58,7 +104,10 @@ async function main() {
     return;
   }
 
-  diagnostics.setDeviceInfo(describeAdapter(gpu.adapter, gpu.device));
+  diagnostics.setDeviceInfo([
+    `scenario: ${DEMO_DAMMING ? 'DAM DEMO (?demo=dam)' : 'default'} — seed ${TERRAIN_PARAMS.seed}, rug ${TERRAIN_PARAMS.ruggedness}`,
+    ...describeAdapter(gpu.adapter, gpu.device),
+  ]);
 
   // WebGPU validation/runtime errors surface here, not via window.onerror —
   // without this, a failing pipeline or bind group fails silently on screen.
@@ -78,6 +127,7 @@ async function main() {
   const initial = generateAndPack(TERRAIN_PARAMS);
   let currentSurfaceHeight = initial.surfaceHeight;
   let currentTerrainData: MaterialArrays = initial.terrainData;
+  let currentSeaLevel = TERRAIN_PARAMS.waterLevel; // hinge of the hypsometric relief tint; tracks the water-level slider
   const { terrainData, surfaceHeight } = initial;
 
   const mesh = buildHexMesh({
@@ -96,17 +146,37 @@ async function main() {
     terrainData.sand,
     TERRAIN_PARAMS.maxSoilDepth,
     FIELD_SIZE,
-    FIELD_SIZE
+    FIELD_SIZE,
+    CLASSIC_ATLAS
   );
   // M3: water is now a GPU compute simulation, seeded once from the
   // generator's flood-fill and GPU-authoritative from here (brief §4.1).
+  // The damming demo starts from a bone-dry world (no flood-fill lake) so the
+  // spring is the only water source and the channel reads clearly.
   const sim = createWaterSim(gpu, {
     fieldCols: FIELD_SIZE,
     fieldRows: FIELD_SIZE,
     hexSize: HEX_SIZE,
     heightTexture: terrain.heightTexture,
-    initialWater: terrainData.water,
+    initialWater: DEMO_DAMMING ? new Float32Array(FIELD_SIZE * FIELD_SIZE) : terrainData.water,
+    springs: DEMO_DAMMING ? [DAMMING_DEMO_SPRING] : undefined,
   });
+  // Global rain (on by default in the sim) swamps the whole map and hides the
+  // channel — the damming demo wants the spring to be the only inflow.
+  // Evaporation off too: with it on, a growing wetted channel loses more and
+  // more water per tick until evaporation balances the (clamp-throttled)
+  // throughflow reaching the front, and the front stops advancing partway —
+  // looks like the water "won't fill the channel". Off, it pools and rises
+  // until it surmounts obstacles, which is the behaviour the demo is showing.
+  if (DEMO_DAMMING) {
+    sim.setRain(false);
+    sim.setEvaporation(0);
+  }
+  // Debug overrides (see URL_PARAMS above) win over the scenario defaults.
+  if (RAIN_OVERRIDE === 'on') sim.setRain(true);
+  if (RAIN_OVERRIDE === 'off') sim.setRain(false);
+  if (EVAP_OVERRIDE === 'on') sim.setEvaporation(0.012);
+  if (EVAP_OVERRIDE === 'off') sim.setEvaporation(0);
   const water = createWaterPipeline(
     gpu,
     mesh,
@@ -127,6 +197,7 @@ async function main() {
     const generated = generateAndPack(newParams);
     currentSurfaceHeight = generated.surfaceHeight;
     currentTerrainData = generated.terrainData;
+    currentSeaLevel = newParams.waterLevel;
     terrain.updateTerrainData(generated.surfaceHeight, generated.terrainData.earth, generated.terrainData.sand, newParams.maxSoilDepth);
     sim.resetWater(generated.terrainData.water); // new terrain, restart the sim's water field from its flood fill
     undoStack.clear(); // old snapshots belong to a terrain that no longer exists
@@ -228,9 +299,10 @@ async function main() {
       }
     }
     terrain.updateTerrainRegion(box, currentSurfaceHeight, currentTerrainData.earth, currentTerrainData.sand);
-    // Water isn't re-flooded on brush edits yet — there's no simulation
-    // driving it until M3, so a freshly-raised dam wouldn't hold anything
-    // back yet regardless. Revisit once M3 lands.
+    // The write above lands in `terrain.heightTexture`, which the water sim
+    // samples read-only every tick (brief §4.1). A brush edit therefore
+    // affects the flow on the next sim tick with nothing more to do here —
+    // raise a ridge across a channel and the water backs up behind it.
   }
 
   let isPainting = false;
@@ -273,7 +345,11 @@ async function main() {
   canvas.addEventListener('pointerup', stopPainting);
   canvas.addEventListener('pointercancel', stopPainting);
 
-  const lightDir: [number, number, number] = [0.4, 0.8, 0.3];
+  // Raking light (altitude ~40°) — a near-overhead sun barely varies the
+  // diffuse term across slopes, so relief reads flat. Low light casts the
+  // tonal gradients that make terrain legible. Pairs with the hypsometric
+  // tint; a future theme may want to own this too.
+  const lightDir: [number, number, number] = [0.5, 0.62, 0.35];
 
   // One height sample per ring vertex, computed here on the CPU (reusing the
   // same lookup picking already uses) so the ring actually hugs the terrain
@@ -308,6 +384,7 @@ async function main() {
   let statsSecondClock = performance.now();
   let lastVolume = 0;
   let lastMaxDepth = 0;
+  let lastMinDepth = 0;
 
   function stepSim(): void {
     const now = performance.now();
@@ -336,10 +413,11 @@ async function main() {
       sim.requestStats((s) => {
         lastVolume = s.totalVolume;
         lastMaxDepth = s.maxDepth;
+        lastMinDepth = s.minDepth;
       });
     }
     diagnostics.setSimStats(
-      `water: vol ${lastVolume.toFixed(0)} | max depth ${lastMaxDepth.toFixed(2)} | ${ticksPerSecond}/s`
+      `water: vol ${lastVolume.toFixed(0)} | depth ${lastMinDepth.toFixed(2)}..${lastMaxDepth.toFixed(2)} | ${ticksPerSecond}/s`
     );
   }
 
@@ -348,7 +426,7 @@ async function main() {
 
     const aspect = gpu!.canvas.width / gpu!.canvas.height;
     const viewProj = camera.viewProjection(aspect);
-    terrain.updateUniforms(viewProj, lightDir);
+    terrain.updateUniforms(viewProj, lightDir, currentSeaLevel);
     water.updateUniforms(viewProj);
 
     if (cursorPoint) {

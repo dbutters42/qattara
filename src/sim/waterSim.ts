@@ -14,12 +14,21 @@ export interface WaterSimOptions {
   heightTexture: GPUTexture;
   /** Initial standing-water depth per cell (from the generator's flood fill). */
   initialWater: Float32Array;
+  /**
+   * Hardcoded test water sources for M3 (brief §2 — real spring placement is
+   * a player tool designed after the sim is proven). Up to 8. `ratePerSecond`
+   * defaults to `SPRING_RATE`. Omit entirely to get a single spring at the
+   * field centre.
+   */
+  springs?: { col: number; row: number; ratePerSecond?: number }[];
 }
 
 export interface WaterSimStats {
   /** Σ depth · cellArea over the whole field. Should track (rain in − evaporation out). */
   totalVolume: number;
   maxDepth: number;
+  /** Smallest per-cell depth seen. The clamp should keep this ≥ 0; a negative value means the pipe model is over-draining somewhere. */
+  minDepth: number;
 }
 
 export interface WaterSim {
@@ -55,17 +64,27 @@ const SPRING_RATE = 3.0; // depth/sec injected at the single hardcoded test spri
 const FLOW_STRENGTH = 8;
 
 // Per-tick multiplier on accumulated flux, applied ONLY to pipes pushing
-// against the surface gradient (dh <= 0) — that's slosh momentum overshooting
-// equilibrium. Downhill pipes are left undamped so the inrush keeps its
-// speed. See the directional-damping block in cs_flux. 1.0 = no damping
-// (original Mei et al.); lower = firmer. At 30 Hz, 0.98 retains ~55% of that
-// residual flux per second, 0.95 ~21%, 0.9 ~4%.
-const FLUX_DAMPING = 0.9;
+// against the surface gradient (dh <= 0). Intended to bleed slosh momentum
+// overshooting equilibrium. 1.0 = no damping (original Mei et al.); lower =
+// firmer. At 30 Hz, 0.98 retains ~55% of that residual flux per second,
+// 0.95 ~21%, 0.9 ~4%.
+//
+// DISABLED (1.0) 2026-09-02: at 0.9 it also killed the micro-gradient that
+// pushes water *through* a chain of connected near-flat pools (dh ≈ 0
+// everywhere, so flux just decays by this factor each tick), stalling flow
+// to distant reservoirs. Net-negative as implemented. If sloshing comes
+// back, address it via FLOW_STRENGTH or a depth-aware scheme, not a blanket
+// gradient-sign multiplier. Feeds D15.
+const FLUX_DAMPING = 1.0;
 
 export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim {
   const { device } = gpu;
   const { fieldCols, fieldRows, hexSize, heightTexture, initialWater } = opts;
   const cellCount = fieldCols * fieldRows;
+
+  if (opts.springs && opts.springs.length > 8) {
+    throw new Error(`waterSim: at most 8 springs, got ${opts.springs.length}`);
+  }
 
   const pipeLength = Math.sqrt(3) * hexSize;
   const cellArea = ((3 * Math.sqrt(3)) / 2) * hexSize * hexSize;
@@ -109,11 +128,12 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
   let rainRate = DEFAULT_RAIN_RATE;
   let evapRate = DEFAULT_EVAP_RATE;
 
-  // One hardcoded test spring at the field centre. Real spring placement is a
-  // player tool designed after the sim is proven (brief §2).
-  const springs: { col: number; row: number; rate: number }[] = [
-    { col: fieldCols >> 1, row: fieldRows >> 1, rate: SPRING_RATE },
-  ];
+  // Hardcoded test springs. Real spring placement is a player tool designed
+  // after the sim is proven (brief §2). Default: one at the field centre;
+  // the damming demo overrides this with a spring at a known channel head.
+  const springs: { col: number; row: number; rate: number }[] = (
+    opts.springs ?? [{ col: fieldCols >> 1, row: fieldRows >> 1 }]
+  ).map((s) => ({ col: s.col, row: s.row, rate: s.ratePerSecond ?? SPRING_RATE }));
   pu[10] = springs.length;
   springs.forEach((s, k) => {
     pf[12 + k * 4 + 0] = s.col;
@@ -223,13 +243,15 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
           const arr = new Float32Array(readback.getMappedRange());
           let sum = 0;
           let mx = 0;
+          let mn = Infinity;
           for (let k = 0; k < arr.length; k++) {
             const v = arr[k]!;
             sum += v;
             if (v > mx) mx = v;
+            if (v < mn) mn = v;
           }
           readback.unmap();
-          statsCallback?.({ totalVolume: sum * cellArea, maxDepth: mx });
+          statsCallback?.({ totalVolume: sum * cellArea, maxDepth: mx, minDepth: mn === Infinity ? 0 : mn });
         })
         .catch(() => {
           /* device lost or buffer destroyed — drop this sample */
