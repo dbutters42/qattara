@@ -1,7 +1,7 @@
 # 00 — STATE (read this first)
 
 **Project: Qattara** — working title.
-**Last updated:** 2026-08-25 (M0 and M1 complete; M2 in progress)
+**Last updated:** 2026-09-02 (M0 and M1 complete; M2 in progress — collapsible panel item done)
 
 ---
 
@@ -34,9 +34,9 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 
 ## 4. Immediate next action
 
-**Small item first, before anything else:** the tools/brush panel (`src/ui/toolbar.ts`) needs to be collapsible. Collapsing must be functionally equivalent to deselecting/unequipping the active tool — same cleanup as tapping the active tool's button again: touch goes back to camera-only navigation (`camera.setPanEnabled(true)`), Fill to Level's persisted reference resets, `cursorPoint` clears, anything else that already runs on deselect. Don't build collapse as just a visual hide with the tool still secretly active underneath.
+**M3 — water** (rain, springs, pipe-model flow, evaporation). This is Dane's stated priority and the next milestone. Brush edits currently don't affect the water at all — the water layer is a static flood-fill from generation (D13), nothing simulates it — so a freshly-raised dam holds nothing back. That gap closes with M3. Some water *rendering* scaffolding already exists (`src/render/water.wgsl`, `waterPipeline.ts`) from M2-era work; the simulation itself is unbuilt.
 
-After that: M2's brush editing is otherwise functionally solid; Dane's own stated priority for the next session is **M3 — water** (rain, springs, pipe-model flow, evaporation). Brush edits currently don't affect the water at all (no simulation exists yet to respond to them) — that gap closes once M3 lands.
+**Done (2026-09-02):** the tools/brush panel (`src/ui/toolbar.ts`) is now collapsible via a `Tools ▼`/`▲` toggle. Collapsing runs the real deselect path — `onToolChange(null)`, same as tapping the active tool button again — so touch returns to camera-only nav, `cursorPoint` clears, and Fill to Level's persisted reference resets; it's not a visual-only hide. Verified on-device by Dane.
 
 **Parked, do not forget:**
 - P5 — Smooth/Ruggedize's once-per-cell-per-stroke interaction model works but isn't considered final; look for something better.

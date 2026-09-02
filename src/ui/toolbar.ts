@@ -41,21 +41,34 @@ export function createToolbar(onToolChange: (tool: ToolId | null) => void, onUnd
   `;
   document.body.appendChild(root);
 
+  // Collapse toggle — visually mirrors the Terrain panel (src/ui/controls.ts).
+  // Behaviourally it's more than a hide: an active brush tool means touch is
+  // capturing paint strokes instead of driving the camera, so collapsing the
+  // panel fully unequips the tool (see the handler further down), rather than
+  // leaving it armed underneath a hidden UI.
+  const toggleBar = document.createElement('div');
+  toggleBar.textContent = 'Tools ▼';
+  toggleBar.style.cssText = 'cursor: pointer; font-weight: bold; margin-bottom: 6px;';
+  root.appendChild(toggleBar);
+
+  const body = document.createElement('div');
+  root.appendChild(body);
+
   function addSectionLabel(text: string): void {
     const label = document.createElement('div');
     label.textContent = text;
     label.style.cssText = 'opacity: 0.6; margin: 6px 0 2px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;';
-    root.appendChild(label);
+    body.appendChild(label);
   }
 
   function addButtonRow<T extends string>(
     entries: readonly { id: T; label: string }[],
     getActive: () => T | null,
     setActive: (id: T) => void
-  ): Map<T, HTMLButtonElement> {
+  ): { buttons: Map<T, HTMLButtonElement>; refresh: () => void } {
     const row = document.createElement('div');
     row.style.cssText = 'display: flex; gap: 6px; flex-wrap: wrap;';
-    root.appendChild(row);
+    body.appendChild(row);
 
     const buttons = new Map<T, HTMLButtonElement>();
     function refresh(): void {
@@ -81,7 +94,7 @@ export function createToolbar(onToolChange: (tool: ToolId | null) => void, onUnd
       row.appendChild(btn);
     }
     refresh();
-    return buttons;
+    return { buttons, refresh };
   }
 
   // A meta-action, not a tool/material selection — its own row, enabled
@@ -99,7 +112,7 @@ export function createToolbar(onToolChange: (tool: ToolId | null) => void, onUnd
   undoBtn.addEventListener('pointerup', () => {
     if (!undoBtn.disabled) onUndo();
   });
-  root.appendChild(undoBtn);
+  body.appendChild(undoBtn);
 
   addSectionLabel('Materials');
   addButtonRow(
@@ -111,7 +124,7 @@ export function createToolbar(onToolChange: (tool: ToolId | null) => void, onUnd
   );
 
   addSectionLabel('Tool');
-  addButtonRow(
+  const toolRow = addButtonRow(
     TOOLS,
     () => activeTool,
     (id) => {
@@ -151,8 +164,25 @@ export function createToolbar(onToolChange: (tool: ToolId | null) => void, onUnd
     row.appendChild(label);
     row.appendChild(input);
     row.appendChild(valueLabel);
-    root.appendChild(row);
+    body.appendChild(row);
   }
+
+  let collapsed = false;
+  toggleBar.addEventListener('pointerup', () => {
+    collapsed = !collapsed;
+    body.style.display = collapsed ? 'none' : 'block';
+    toggleBar.textContent = collapsed ? 'Tools ▲' : 'Tools ▼';
+    // Collapsing unequips the active tool outright — the same path as tapping
+    // its button again: onToolChange(null) is what hands touch back to the
+    // camera, clears cursorPoint, and resets Fill to Level's sampled
+    // reference over in main.ts. toolRow.refresh() drops the button highlight
+    // so the panel reflects the unequipped state when it's expanded again.
+    if (collapsed && activeTool !== null) {
+      activeTool = null;
+      onToolChange(null);
+      toolRow.refresh();
+    }
+  });
 
   return {
     settings,
