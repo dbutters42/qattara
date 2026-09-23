@@ -52,7 +52,7 @@ Dane's request. Three solid materials total:
 - **Two suspended-sediment channels** so transported material keeps its identity when deposited.
 
 ### D10 — No Mac; Windows plus an Ubuntu server *(2026-08-25)*
-- Native iOS is effectively off the table (Xcode is macOS-only). D3 is near-mandatory rather than merely convenient. A future App Store build would need a cloud macOS CI runner.
+- Native iOS is effectively off the table (Xcode is macOS-only). D3 is near-mandatory rather than merely convenient. A future App Store build would need a cloud macOS CI runner. *(Superseded in part by D20/D21: hosted macOS runner or a used Apple-silicon Mac, at M7.)*
 - iOS Safari Web Inspector requires macOS, but remote debugging is possible from Windows/Linux via `ios-webkit-debug-proxy` (open source) or Inspect.dev (paid). Plan for an in-page console overlay (eruda/vconsole) as the low-friction default.
 - The Ubuntu server is an asset: serve dev builds over LAN and load them on the iPad by IP. Faster than pushing to GitHub Pages each iteration.
 
@@ -139,9 +139,114 @@ It's the only option with no dependence on live state, so it's consistent regard
 - **Consequence: total water volume is no longer a closed-domain invariant.** The HUD volume now also moves with edge inflow/outflow (including a steady trickle of rain draining off land edges). M3's "rain off/evap off → vol dead flat" check only holds on `?demo=dam`-style no-sea maps with nothing reaching a land edge. **M4's mass-conservation criterion (`06-m4-brief.md` §3) must be restated to account for material crossing the edge** — either a no-sea test map or explicit edge-flux accounting.
 - With evaporation on, a basin fed by a channel from the sea settles slightly below sea level (channel inflow balances evaporation from the basin) — expected, and the real Qattara scheme in miniature, not a bug.
 
+### D18 — Water model: virtual pipes, not Navier-Stokes or SPH *(2026-08-25, merged 2026-09-23)*
+*Written as addendum D11 in a Cowork session on 2026-08-25; uploaded to GitHub but not merged until 2026-09-23 (renumbered — the log's D11–D14 were already taken). M3 (D15) has since borne it out.*
+
+`03-outline.md` §3.1 specifies the virtual-pipes model but never recorded what was rejected, which leaves the door open to someone "upgrading" it to a real fluid solver. Don't.
+
+| | Virtual pipes (chosen) | Navier-Stokes / SPH |
+| --- | --- | --- |
+| Model | Each cell holds a water depth; flux between neighbours is driven by water-surface height difference | Velocity and pressure fields solved per step |
+| Pools and settles? | **Yes, naturally** | No — water sloshes indefinitely without extra damping work |
+| Cost | One compute pass | Several passes, plus a pressure solve |
+| Couples to terrain the player is editing every frame? | **Trivially — same grid** | Badly — the boundary conditions change constantly |
+| Prior art for erosion coupling | Extensive | Sparse |
+
+The three reasons, in order of weight:
+
+1. **Pooling and damming are the point of this toy.** A solver that has to be fought into settling is the wrong tool for a game about filling a basin.
+2. **The terrain is destructible by design.** Fluid solvers assume boundaries that change slowly. Ours changes wherever the player drags a finger.
+3. **Cost.** One pass versus several, on a phone.
+
+Splashing, waves, and spray are explicitly not being chased — see `03-outline.md` §8.
+
+### D19 — The world is bounded, and that is a decision, not a limitation *(2026-08-25, merged 2026-09-23)*
+*Addendum D12.* See also D17: the map edge is now an open boundary (sea / drainable land beyond it), but the *simulated* world is still bounded — the ghosts beyond the edge are frozen, not simulated, so this reasoning is unchanged.
+
+`03-outline.md` §8 lists "infinite or streaming worlds" as a non-goal without saying why. Two reasons:
+
+1. **Memory.** ~56 bytes per cell caps the field at 1024 × 1024 (~59 MB) with 1536² as a stretch. See `03-outline.md` §3.4.
+2. **The simulation needs to see the whole watershed at once.** This is the load-bearing reason. Hydraulic erosion is a global process — where water goes depends on the entire connected drainage network, not on a local neighbourhood. Stream the world in chunks and rivers stop at chunk boundaries, or worse, behave differently depending on what happens to be resident. A bounded world isn't a compromise here; it's what makes the erosion correct.
+
+### D20 — macOS access: hosted CI runner, not a VM *(2026-08-25, merged 2026-09-23)*
+*Addendum D13.* **Amended 2026-09-23 by D21:** Dane may instead obtain a used Mac when M7 arrives; this entry's hosted-runner plan stays the default if not. The VM ruling stands either way.
+
+Supersedes the flat "native iOS is off the table" framing in D10.
+
+**Ruled out: macOS in a VM on the Ubuntu server**
+
+Technically achievable (OSX-KVM / QEMU), but rejected on three grounds:
+
+1. **Licensing.** The macOS Tahoe 26 SLA §2B(iii) permits two virtual instances "on each **Apple-branded computer** you own or control that is already running the Apple Software." An x86 Ubuntu server is not that. Relevant because the endpoint is publishing under a real Apple developer account.
+2. **It's a dead end on a timer.** Apple confirmed at WWDC 2025 that **macOS Tahoe 26 is the last release supporting Intel**; macOS 27 is Apple-silicon only. An x86 VM caps out at Tahoe permanently while Xcode moves on.
+3. **No GPU acceleration**, which for a WebGPU/Metal app is precisely the thing you'd want to test.
+
+**Chosen: GitHub Actions macOS runners**
+
+- **Free for public repositories.** `dbutters42/qattara` is public, so this costs nothing. (Private repos bill macOS at ~$0.062/min, roughly 10× Linux.) **Keeping the repo public is now a load-bearing decision, not just a default.**
+- Real Apple-silicon hardware with Xcode, licensed, triggered by a push.
+- Handles build, code-sign, and TestFlight upload — the whole pipeline.
+
+**Still needed separately**
+
+- **Apple Developer Program**, ~$99/yr, for signing and distribution. Not required to *build*, required to *ship*. **Enrolment is not always instant** — individual applications can take days, longer if Apple asks for identity verification. Start it in parallel with R1 rather than discovering the delay later.
+- **iPad debugging** is unaffected either way — `ios-webkit-debug-proxy` on Linux plus the in-app diagnostics overlay remain the story. A macOS VM would have needed USB passthrough of the device and wouldn't have helped.
+
+### D21 — iOS delivery path stays at M7, "only if earned" — addendum D14 (TestFlight at M2) not adopted *(2026-09-23)*
+Addendum D14 (2026-08-25) proposed pulling the whole Capacitor → signing → TestFlight pipeline forward to immediately after M2, gated on R1. It was never actioned — the addendum wasn't merged, and M3 was built instead. Reviewed with Dane on 2026-09-23: **the App Store / TestFlight path stays at M7, only if the toy earns it.** Its original reasoning is preserved below because it's a genuine argument, not a straw man.
+
+**What changed since it was written:**
+- **R1 has cheap positive evidence** (see R1 in `03-outline.md` §10): the dev build renders in **Microsoft Edge on the iPad**. Outside the EU, every iOS browser — Edge and Chrome included — must use Apple's WebKit via `WKWebView`, not its desktop engine (Edge is Chromium on desktop, *not* on iOS). So WebGPU is available in a third-party `WKWebView`, which is what Capacitor uses. Not yet proven: performance parity with Safari, and whether Edge's `WKWebView` configuration differs from Capacitor's default.
+- **The addendum underestimated R1's cost.** A proper R1 needs a throwaway iOS app on a real device — impossible without a Mac or the paid Developer Program + CI pipeline. The Edge check is the practical substitute until M7.
+- **The honest performance test is M4**, as the addendum's own measurement note says — so deferring the pipeline past M4 loses little.
+
+**Mac option for M7 (researched 2026-09-23).** Dane may buy a used Mac rather than rely solely on the CI runner (D20). Constraints, as of Sep 2026:
+- App Store Connect requires builds made with **Xcode 26 / iOS 26 SDK** (since 2026-04-28). Xcode 26 needs **macOS Sequoia 15.6 or later**. Capacitor 8 needs Xcode 26. **So today's floor is macOS 15.6.**
+- The floor moves: Apple raises the required SDK roughly every spring, and **macOS 27 is Apple-silicon only** (D20). An Intel Mac tops out at Tahoe 26 and will be unable to run the Xcode that App Store Connect requires within about a year or two.
+- **Buy Apple silicon (M1 or later)** — any M-series Mac runs current macOS; an Intel Mac is a dead end for this purpose. Re-check Apple's then-current SDK requirement at purchase time.
+
+**Original addendum D14, for reference:**
+
+**Decision:** pull the entire iOS delivery path forward from M7 to immediately after M2. Prove a signed build installs on Dane's iPad *before* building M3 and M4.
+
+**Why**
+
+1. **Shipping is the actual goal.** Dane's stated ambition for the App Store is "just to say I did it." When the shipping *is* the deliverable, scheduling it last — behind three months of work that could turn out to rest on a broken assumption — is backwards.
+2. **Failure is cheap right now and expensive later.** At M2 the app is small. If the delivery path doesn't work, very little is wasted. At M7 it would be months.
+3. **The unfun part should happen while motivation is high.** Signing, provisioning profiles, and CI config are nobody's idea of a good evening. Do them while the project is exciting, not at the end when you just want to play the thing.
+4. **It converts risk into upside.** Once a signed build is on the iPad, every remaining milestone is pure gain rather than accumulating exposure to an unproven assumption.
+
+**Target: TestFlight *internal* testing — not the App Store**
+
+Internal TestFlight builds **skip App Review entirely**. That means:
+
+- No exposure to Guideline 4.2 (Minimum Functionality), which is what rejects thin webview wrappers.
+- No public listing, no rejection on the account's record.
+- Still exercises the entire hard part: Capacitor shell → signing → Xcode build on the runner → upload → install on a real device.
+
+Full App Store submission stays deferred until the game is actually worth playing.
+
+**Revised order**
+
+| Step | Proves | Effort |
+| --- | --- | --- |
+| **R1** — `WKWebView` WebGPU check on a real iPad | Whether any of this is possible **(blocking)** | ~half a day |
+| Apple Developer Program enrolment *(start in parallel)* | Unblocks signing | ~$99/yr, days to approve |
+| Capacitor wrap + GitHub Actions macOS workflow | The build pipeline | 1–2 days |
+| Signed build → TestFlight internal → installed on iPad | **Done. The line is crossed.** | included above |
+| M3 — water | The core fantasy | ~2 weeks |
+| M4 — erosion | Rivers carve and deposit | 2–4 weeks |
+| M5, M6 | Looks, persistence, uplift | open-ended |
+| Full App Store submission | Public release | when it's worth playing |
+
+Total cash cost of the delivery path: **$99/yr.** Everything else is free while the repo stays public.
+
 ---
 
 ## 2. Parked
+
+### P7 — Reference image: ridgeline elevation plot *(uploaded 2026-08-28, logged 2026-09-23)*
+`docs/design/Example relief mapping.jpg` — a ridgeline-style ("joy plot") elevation map of the Levant: horizontal elevation profiles on black, coloured blue below sea level → white at sea level → orange → purple peaks. Uploaded by Dane without an accompanying note; its intended use isn't recorded yet (a candidate relief theme under D16's data-only theme system? a style reference for M5?). Ask, then record.
 
 ### P6 — Hypsometric tint: actual water extent vs sea-level hinge *(raised 2026-09-02)*
 The M5-pulled-forward relief tint (`src/render/reliefTheme.ts`) colours every cell below the current water level blue, whether or not water has actually reached it. Dane wants to consider showing blue only for genuinely-wet cells. Not a trivial change: since M3 the water field is GPU-authoritative in a ping-ponged storage buffer, so the terrain fragment shader would need that buffer bound in (two bind groups, flipped on `sim.currentWaterIndex()` — the pattern `waterPipeline` already uses). It also opens a design question — dry sub-sea-level ground then needs *some* treatment or the "this is a depression" read is lost; a sea-level contour line may be the better answer. Decide at M5 together with the contour-line work.

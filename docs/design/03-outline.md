@@ -125,7 +125,7 @@ Recommended counterforces:
 | M4 | Erosion, two-channel sediment transport, thermal slumping | Rivers carve channels and build deltas | 2-4 weeks, mostly tuning — brief: `06-m4-brief.md` |
 | M5 | Looks — relief shading, AO, water shading, material colour | It stops looking like a tech demo | open-ended |
 | M6 | Save/load, ambient catch-up sim, uplift | It becomes a place you return to | ~1 week |
-| M7 | Capacitor wrap for the App Store | Only if earned; needs a cloud macOS runner | later |
+| M7 | Capacitor wrap for the App Store | Only if earned (D21); hosted macOS runner or used Apple-silicon Mac (D20/D21); R1 confirmed first | later |
 
 **M0 is a gate.** See `04-m0-brief.md`.
 
@@ -161,7 +161,8 @@ Evenings and weekends, learning as you go: **M0 through M4 is a 2-3 month arc**,
 | Hex adaptation — no reference implementation to copy | Medium | Red Blob Games for grid math; adapt the erosion papers pass by pass. Write hex neighbour helpers once and test in isolation. |
 | World flattens to a plain over long idle periods | Medium | Section 6 — non-erodable rock plus slow uplift |
 | Fill rate / vertex count on iPhone at 3x retina | Medium | Reduced internal resolution + upscale; mesh density below field resolution; iPad-first |
-| No Mac — limited iOS debugging, no native build path | Medium | In-page console overlay; ios-webkit-debug-proxy when needed; cloud macOS runner only if M7 happens |
+| No Mac — limited iOS debugging, no native build path | Medium | In-page console overlay; ios-webkit-debug-proxy when needed; at M7, hosted macOS runner or a used Apple-silicon Mac (D20, D21) |
+| **R1 — WebGPU inside `WKWebView` (what Capacitor wraps the app in) unverified** | High for M7, none before | **Cheap evidence it passes (2026-09-23):** the dev build renders in Edge on iPad, and iOS Edge is `WKWebView`-based. Still unproven: performance vs Safari, Capacitor's own configuration. Confirm properly with a real Capacitor build at M7 start. See D21. |
 | Scope creep back toward caves and voxels | Low | Section 8 exists for this reason |
 
 ---

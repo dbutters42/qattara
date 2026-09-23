@@ -14,14 +14,14 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 | Item | Status |
 | --- | --- |
 | Brief and name | `01-brief.md` |
-| Decisions D1–D17 | Settled — `02-decisions.md`. |
+| Decisions D1–D21 | Settled — `02-decisions.md`. |
 | Design outline | Complete — `03-outline.md` |
 | M0 | **Complete** — `04-m0-brief.md`. Go/no-go passed: 60fps on both iPad and iPhone with real geometry. |
 | M1 | **Complete.** Procedural generator with player-facing sliders (ruggedness, depth/elevation range, rockiness, sand reach, water level) plus New Seed/Random/Flat presets. See D13. |
 | M2 | **Complete.** Touch picking, six brush tools (Raise/Lower/Level/Fill to Level/Smooth/Ruggedize), Materials selector, undo, terrain-conforming cursor ring, collapsible tools panel — all working on-device. See D14. Smooth/Ruggedize's interaction model is still flagged for revisit (P5) but the milestone is done. |
 | M3 | **Complete** — `05-m3-brief.md`. Virtual-pipes water sim (3 compute passes/tick, hex neighbour arithmetic in `src/hex/coords.ts` + `src/sim/water.wgsl`), water GPU-authoritative, 30 Hz fixed-timestep accumulator, volume/min/max-depth readback in the HUD. Tuning settled as **D15**: `FLOW_STRENGTH` ×8 kept, `FLUX_DAMPING` tried and removed (it stalled flow through connected pools). All §3 criteria met on-device: damming + flow + connected-pool levelling via `?demo=dam`; conservation/stability via debug `?rain=`/`?evap=` params (rain-off/evap-off → vol constant to float precision; rain-on/evap-off → linear vol, no negatives, 60 fps). Only unverified: iPhone ≥30 fps with the sim (low risk). No erosion — that's M4. |
 | Map edge (D17) | **Complete** — built and verified on-device 2026-09-23. Pulled in before M4: world beyond the edge frozen at generation — open sea (infinite reservoir at water level) where the edge was below it, drainable dry land elsewhere. |
-| M4 | **Not started** — `06-m4-brief.md` (drafted 2026-09-02). Erosion / deposition, two-channel sediment transport, thermal slumping on top of the M3 pipe model. Completes the D15 authority shift (terrain → GPU-authoritative; **D18** pending). Mostly parameter tuning — a live dev panel is in scope from the first slice. |
+| M4 | **Not started** — `06-m4-brief.md` (drafted 2026-09-02). Erosion / deposition, two-channel sediment transport, thermal slumping on top of the M3 pipe model. Completes the D15 authority shift (terrain → GPU-authoritative; **D22** pending). Mostly parameter tuning — a live dev panel is in scope from the first slice. |
 | Code | Vite + TypeScript + WebGPU scaffold in `~/projects/qattara` on milliwaysserver. Hex coordinate helpers (tested), hex mesh + procedural terrain generator (tested), displacement/lighting shader, touch orbit camera, brush editing + tool/material UI, undo, GPU water simulation (`src/sim/`), on-device diagnostics overlay. |
 
 ## 3. The decisions that matter most

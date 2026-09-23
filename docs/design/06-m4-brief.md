@@ -61,7 +61,7 @@ M3 established the boundary (D15): terrain was CPU-authoritative, the sim only *
 - After the erosion + thermal passes each tick, write the combined surface height (`rock+earth+sand`) into the existing `heightTexture` — a small dedicated pass, or `copyBufferToTexture` (1024×4 = 4096 B/row, already 256-aligned). Optionally refresh the `earth` / `sand` textures too; the relief tint's material term is only ~20% so a frame of staleness there is invisible, but the water sim reads height every tick and must see the current bed.
 - Net effect: the displaced mesh, the relief shader, and the M3 water passes all keep reading textures exactly as they do now. Only the *source* of the height texture changes.
 
-Alternative considered: `heightTexture` etc. as read-write `r32float` storage textures the passes write directly (no buffer copy). Fewer moving parts, but storage-texture read-write support is newer and the buffer path keeps the indexing arithmetic explicit, matching the rest of the sim. **Decide and log as D18** once the first slice works.
+Alternative considered: `heightTexture` etc. as read-write `r32float` storage textures the passes write directly (no buffer copy). Fewer moving parts, but storage-texture read-write support is newer and the buffer path keeps the indexing arithmetic explicit, matching the rest of the sim. **Decide and log as D22** once the first slice works.
 
 ### 4.2 New per-cell state
 
@@ -130,13 +130,14 @@ Same non-blocking readback path as M3's volume stat (a reduction copied to a map
 2. **The two clamps in §4.4.** Erosion/deposition bounded by what's actually present; advection bounded by the carrying water. Everything else tolerates a wide range of constants; these don't.
 3. **Parity-correct neighbour gradients (D12).** Fourth time. Reuse, don't rederive. The failure mode here is subtle, which makes it worse.
 4. **Flux-based advection, not off-grid sampling.** Grid-native, exactly conservative, no hex interpolation headache.
-5. **Build the tuning panel with the sim, not after.** The risk register calls erosion-parameter interaction "High" severity. Live sliders for `Kc`, `Ks`, `Ke`, `Kd`, the talus angles and `Kt`, against `?demo=erode`, from the first working slice.
-6. **Keep the terrain-authority migration boring.** The sim owns `rock`/`earth`/`sand` buffers and writes the height texture each tick; the mesh, relief shader and M3 water passes should not need to change how they read anything.
-7. **One submit per tick still.** Seven passes in one command encoder.
+5. **Per-pass GPU timings from the first slice.** From the merged 2026-08-25 addendum (see D21), originally meant to land at M3 and never done: add WebGPU `timestamp-query` around each compute pass and show per-pass ms in the HUD. `timestamp-query` is *reported* available on iOS — verify on-device; fall back to whole-submit timing via `onSubmittedWorkDone` if not. M4 is the honest "is a webview fast enough" test, and without real per-pass numbers every "should we go native / half-res?" conversation is an argument.
+6. **Build the tuning panel with the sim, not after.** The risk register calls erosion-parameter interaction "High" severity. Live sliders for `Kc`, `Ks`, `Ke`, `Kd`, the talus angles and `Kt`, against `?demo=erode`, from the first working slice.
+7. **Keep the terrain-authority migration boring.** The sim owns `rock`/`earth`/`sand` buffers and writes the height texture each tick; the mesh, relief shader and M3 water passes should not need to change how they read anything.
+8. **One submit per tick still.** Seven passes in one command encoder.
 
 ## 6. New decisions to log when this settles
 
-- **D18** — how terrain becomes GPU-authoritative: the sim-owns-buffers + texture-writeback approach of §4.1 (vs read-write storage textures), once the first slice confirms it.
+- **D22** — how terrain becomes GPU-authoritative: the sim-owns-buffers + texture-writeback approach of §4.1 (vs read-write storage textures), once the first slice confirms it.
 - Possibly a short decision on **flux-based sediment advection on hex** if the reasoning turns out worth preserving (it's the natural consequence of D8 + D12, but M4 is where it's first actually built).
 - The eventual **erosion constants** that survive tuning — record the final set and what each visibly controls, the way D13 recorded the generator.
 
