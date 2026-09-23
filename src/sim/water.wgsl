@@ -10,6 +10,13 @@
 //
 // Terrain height is read-only here (M3 does no erosion). It lives in the
 // render pipeline's height texture; this sim only samples it.
+//
+// Map edge (D17): each edge cell's off-field pipes lead to a "ghost" — ground
+// frozen at that cell's generation-time height (`ghostHeight`). Below sea
+// level the ghost is an infinite sea at `seaLevel`, which can push water in
+// or take it out; above, it's dry land water can drain onto but never come
+// back from. Off-field pipes carry one *signed* flux (+ out, − in from the
+// sea) — see cs_flux / cs_water.
 
 struct Params {
   dt: f32,
@@ -29,6 +36,8 @@ struct Params {
 
   // (col, row, ratePerSecond, _) — hardcoded test sources for M3.
   springs: array<vec4<f32>, 8>,
+
+  seaLevel: f32,       // surface of the off-map sea (D17); the generator's waterLevel
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -37,6 +46,7 @@ struct Params {
 @group(0) @binding(3) var<storage, read_write> waterDst: array<f32>;
 @group(0) @binding(4) var<storage, read_write> flux: array<f32>;      // 6 per cell
 @group(0) @binding(5) var<storage, read_write> velocity: array<f32>;  // 2 per cell
+@group(0) @binding(6) var<storage, read> ghostHeight: array<f32>;     // perimeter, see edgeSlot
 
 // Axial neighbour offsets (dq, dr), same order and meaning as
 // AXIAL_DIRECTIONS in src/hex/coords.ts. opposite(d) == (d + 3) % 6.
@@ -71,6 +81,19 @@ fn neighborIndex(col: u32, row: u32, d: u32) -> i32 {
   let ncol = q + off.x + nr / 2;
   if (ncol < 0 || ncol >= i32(params.fieldCols)) { return -1; }
   return nr * i32(params.fieldCols) + ncol;
+}
+
+// Slot of an edge cell's ghost in `ghostHeight`: top row, bottom row, left
+// column, right column; corners take their row's slot. Exact arithmetic of
+// edgeSlot() in src/sim/edgeGhost.ts (unit-tested) — keep in lockstep.
+// Only ever called for cells that have an off-field pipe, i.e. edge cells.
+fn edgeSlot(col: u32, row: u32) -> u32 {
+  let cols = params.fieldCols;
+  let rows = params.fieldRows;
+  if (row == 0u) { return col; }
+  if (row == rows - 1u) { return cols + col; }
+  if (col == 0u) { return 2u * cols + row; }
+  return 2u * cols + rows + row; // col == cols - 1
 }
 
 fn texelOf(index: i32) -> vec2<i32> {
@@ -109,13 +132,24 @@ fn cs_flux(@builtin(global_invocation_id) gid: vec3<u32>) {
   let terrainHere = textureLoad(heightTex, vec2<i32>(i32(gid.x), i32(gid.y)), 0).r;
   let surfHere = terrainHere + wHere;
 
-  // Accumulate the tentative new outflow to each neighbour. A pipe to an
-  // off-field neighbour carries nothing (reflective boundary).
+  // Accumulate the tentative new outflow to each neighbour.
   var newF = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
   var totalOutRate = 0.0;
   for (var d = 0u; d < 6u; d = d + 1u) {
     let ni = neighborIndex(gid.x, gid.y, d);
-    if (ni < 0) { continue; }
+    if (ni < 0) {
+      // Off-field pipe to the ghost beyond the edge (D17). Same pipe
+      // equation, one signed flux. The ghost's surface is the sea where its
+      // frozen ground is below sea level, else the dry ground itself.
+      let gh = ghostHeight[edgeSlot(gid.x, gid.y)];
+      let isSea = gh <= params.seaLevel;
+      let ghostSurf = max(gh, params.seaLevel);
+      var f = flux[i * 6u + d] + params.dt * params.gravity * params.pipeArea * (surfHere - ghostSurf) / params.pipeLength;
+      if (!isSea) { f = max(0.0, f); } // dry land never sends water back
+      newF[d] = f;
+      totalOutRate = totalOutRate + max(0.0, f);
+      continue;
+    }
     let t = texelOf(ni);
     let nSurf = textureLoad(heightTex, t, 0).r + waterSrc[ni];
     let dh = surfHere - nSurf;
@@ -139,8 +173,10 @@ fn cs_flux(@builtin(global_invocation_id) gid: vec3<u32>) {
     k = min(1.0, storedVol / totalOutVol);
   }
 
+  // Only outflow is scaled. A negative (sea-inflow) off-field flux comes
+  // from an infinite reservoir, so there's nothing on its side to clamp.
   for (var d = 0u; d < 6u; d = d + 1u) {
-    flux[i * 6u + d] = newF[d] * k;
+    flux[i * 6u + d] = select(newF[d] * k, newF[d], newF[d] < 0.0);
   }
 }
 
@@ -153,14 +189,18 @@ fn cs_water(@builtin(global_invocation_id) gid: vec3<u32>) {
   var outflow = 0.0;
   var vel = vec2<f32>(0.0, 0.0);
   for (var d = 0u; d < 6u; d = d + 1u) {
-    let out_d = flux[i * 6u + d];
-    outflow = outflow + out_d;
-
-    let ni = neighborIndex(gid.x, gid.y, d);
+    let f = flux[i * 6u + d];
+    var out_d = f;
     var in_d = 0.0;
+    let ni = neighborIndex(gid.x, gid.y, d);
     if (ni >= 0) {
       in_d = flux[u32(ni) * 6u + ((d + 3u) % 6u)]; // neighbour's outflow toward us
+    } else {
+      // Off-field signed flux (D17): + drains off the map, − is sea inflow.
+      out_d = max(0.0, f);
+      in_d = max(0.0, -f);
     }
+    outflow = outflow + out_d;
     inflow = inflow + in_d;
     vel = vel + dirWorld(d) * (out_d - in_d);
   }

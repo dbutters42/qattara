@@ -117,6 +117,28 @@ Pulled forward from M5 because near-overhead light + no elevation cue + material
 - **Light dropped to ~40° altitude** (`lightDir` in `main.ts`) — a near-overhead sun barely varies the diffuse term across slopes; raking light is what casts the tonal gradients that make relief legible. A future theme may want to own the light too.
 - Deferred to M5 proper (see P6): tinting only the *actual* water extent rather than everything below sea level, and contour lines.
 
+### D17 — Map edge: frozen world beyond the edge — open sea below sea level, drainable dry land above *(2026-09-23)*
+Pulled in before M4 at Dane's request; verified on-device the same day. Replaces M3's reflective (walled) boundary. `src/sim/edgeGhost.ts` + `cs_flux`/`cs_water` in `src/sim/water.wgsl`.
+
+**The rule: the player reshapes the map, never the world beyond it.** Each edge cell has one "ghost" just past the edge: ground frozen at that cell's height *when the terrain was generated* (a perimeter snapshot, `ghostHeight`). Where that frozen ground is below the water level, the ghost is **open sea — an infinite reservoir at the water level**; elsewhere it's **dry land** at the frozen height. Off-field pipes run the ordinary pipe equation against the ghost's surface, so there's one set of physics for both cases:
+- **Sea ghost:** pushes water in when the edge cell's surface is below sea level, takes it out when above. A sea-connected basin that gets breached into a dry basin refills from the edge, so *both* end at sea level (the motivating case). Walling off a sea edge above sea level holds the sea outside.
+- **Land ghost:** water above the frozen ground drains off the map and never comes back. Rivers flow off-map instead of pooling against an invisible wall (a wall is effectively infinitely high terrain beyond the edge — contradicts the model).
+
+**Why frozen at generation, not live.** Three options were weighed with Dane:
+| Ghost is sea where… | Dry basin dug at the edge | Rain |
+| --- | --- | --- |
+| …edge terrain is below sea level *now* (live terrain) | ❌ spontaneously fills from the edge | — |
+| …edge cell is below sea level *and currently wet* (live water) | ✅ stays dry… | ❌ …until rain wets it, then the edge fills it — outcome depends on timing |
+| …the edge was sea at generation (**chosen**) | ✅ stays dry (beyond it is land, as it always was) | ✅ rain can fill it, never connects it to the sea |
+
+It's the only option with no dependence on live state, so it's consistent regardless of rain or brushing. The ghosts are rebuilt only on regeneration (`resetWater`), which is also how a water-level slider change reaches them. Every edge cell at or below `waterLevel` at generation is a flood-fill seed (D13), so "ghost is sea" ⇔ "that edge cell was sea" — the two agree by construction; the ghost buffer stores only heights, and sea-vs-land is `ghostHeight <= seaLevel`.
+
+**Implementation notes.**
+- An off-field pipe carries **one signed flux** (+ out, − sea inflow) in the existing flux slot. The outflow clamp scales only the positive part — the sea side is infinite, there's nothing to clamp. Land ghosts are clamped to ≥ 0.
+- `?demo=dam` passes a sea level below any terrain (`NO_SEA`): all edges are dry land, so the spring stays the only inflow (D15's demo contract).
+- **Consequence: total water volume is no longer a closed-domain invariant.** The HUD volume now also moves with edge inflow/outflow (including a steady trickle of rain draining off land edges). M3's "rain off/evap off → vol dead flat" check only holds on `?demo=dam`-style no-sea maps with nothing reaching a land edge. **M4's mass-conservation criterion (`06-m4-brief.md` §3) must be restated to account for material crossing the edge** — either a no-sea test map or explicit edge-flux accounting.
+- With evaporation on, a basin fed by a channel from the sea settles slightly below sea level (channel inflow balances evaporation from the basin) — expected, and the real Qattara scheme in miniature, not a bug.
+
 ---
 
 ## 2. Parked

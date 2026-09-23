@@ -66,6 +66,9 @@ const DAMMING_DEMO_PARAMS: Partial<TerrainGenParams> = {
 // front stalls partway; see D15.
 const DAMMING_DEMO_SPRING = { col: 181, row: 168, ratePerSecond: 300 } as const;
 
+// Sea level below any possible terrain: every map edge is dry land (D17).
+const NO_SEA = -1e30;
+
 const URL_PARAMS = new URLSearchParams(location.search);
 const DEMO_DAMMING = URL_PARAMS.get('demo') === 'dam';
 
@@ -159,6 +162,10 @@ async function main() {
     hexSize: HEX_SIZE,
     heightTexture: terrain.heightTexture,
     initialWater: DEMO_DAMMING ? new Float32Array(FIELD_SIZE * FIELD_SIZE) : terrainData.water,
+    initialSurfaceHeight: surfaceHeight,
+    // The damming demo has no off-map sea either — the spring must stay the
+    // only inflow — so every edge is dry land (water can still drain off).
+    seaLevel: DEMO_DAMMING ? NO_SEA : TERRAIN_PARAMS.waterLevel,
     springs: DEMO_DAMMING ? [DAMMING_DEMO_SPRING] : undefined,
   });
   // Global rain (on by default in the sim) swamps the whole map and hides the
@@ -199,7 +206,8 @@ async function main() {
     currentTerrainData = generated.terrainData;
     currentSeaLevel = newParams.waterLevel;
     terrain.updateTerrainData(generated.surfaceHeight, generated.terrainData.earth, generated.terrainData.sand, newParams.maxSoilDepth);
-    sim.resetWater(generated.terrainData.water); // new terrain, restart the sim's water field from its flood fill
+    // New terrain: restart the water from its flood fill and re-freeze the world beyond the edge (D17).
+    sim.resetWater(generated.terrainData.water, generated.surfaceHeight, DEMO_DAMMING ? NO_SEA : newParams.waterLevel);
     undoStack.clear(); // old snapshots belong to a terrain that no longer exists
     toolbar.setUndoEnabled(false);
   });

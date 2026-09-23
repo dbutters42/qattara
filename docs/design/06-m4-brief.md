@@ -35,7 +35,7 @@ Nothing yet. M3 (`05-m3-brief.md`) is the foundation: the pipe model, the `water
 | Frame rate on iPhone | ≥ 30 fps (the M3 iPhone check is also still outstanding — do both) |
 | Sim resolution | Full 1024 × 1024. Half-res fallback only if profiling forces it. |
 | Tick rate | Fixed 30 Hz, decoupled from render (unchanged from M3). Thermal pass may run every Nth tick. |
-| **Mass conservation** | Rain off, no springs, closed field → total solid mass (`rock+earth+sand+suspended`)·cellArea constant to float precision. No cell's earth/sand/suspended goes negative. Nothing oscillates or explodes. |
+| **Mass conservation** | Rain off, no springs, closed field → total solid mass (`rock+earth+sand+suspended`)·cellArea constant to float precision. **Since D17 the field isn't closed** — water (and so suspended sediment) crosses the map edge. Test on a no-sea map with nothing reaching an edge (as `?demo=dam` does), or account for edge flux explicitly; decide which at M4 start. No cell's earth/sand/suspended goes negative. Nothing oscillates or explodes. |
 | **Armouring** | Run water across a cell of mixed sand+earth → sand depletes first, earth remains, local erosion rate drops as it coarsens. |
 | **Channel incision** | Rain or a spring on a broad slope → a defined channel cuts over sim-minutes (not instantly, not never), and tributaries join it. |
 | **Delta / deposition** | Where moving water enters standing water or a flat → terrain builds outward/upward there; the suspended load drops as the water slows. |
@@ -61,7 +61,7 @@ M3 established the boundary (D15): terrain was CPU-authoritative, the sim only *
 - After the erosion + thermal passes each tick, write the combined surface height (`rock+earth+sand`) into the existing `heightTexture` — a small dedicated pass, or `copyBufferToTexture` (1024×4 = 4096 B/row, already 256-aligned). Optionally refresh the `earth` / `sand` textures too; the relief tint's material term is only ~20% so a frame of staleness there is invisible, but the water sim reads height every tick and must see the current bed.
 - Net effect: the displaced mesh, the relief shader, and the M3 water passes all keep reading textures exactly as they do now. Only the *source* of the height texture changes.
 
-Alternative considered: `heightTexture` etc. as read-write `r32float` storage textures the passes write directly (no buffer copy). Fewer moving parts, but storage-texture read-write support is newer and the buffer path keeps the indexing arithmetic explicit, matching the rest of the sim. **Decide and log as D17** once the first slice works.
+Alternative considered: `heightTexture` etc. as read-write `r32float` storage textures the passes write directly (no buffer copy). Fewer moving parts, but storage-texture read-write support is newer and the buffer path keeps the indexing arithmetic explicit, matching the rest of the sim. **Decide and log as D18** once the first slice works.
 
 ### 4.2 New per-cell state
 
@@ -136,7 +136,7 @@ Same non-blocking readback path as M3's volume stat (a reduction copied to a map
 
 ## 6. New decisions to log when this settles
 
-- **D17** — how terrain becomes GPU-authoritative: the sim-owns-buffers + texture-writeback approach of §4.1 (vs read-write storage textures), once the first slice confirms it.
+- **D18** — how terrain becomes GPU-authoritative: the sim-owns-buffers + texture-writeback approach of §4.1 (vs read-write storage textures), once the first slice confirms it.
 - Possibly a short decision on **flux-based sediment advection on hex** if the reasoning turns out worth preserving (it's the natural consequence of D8 + D12, but M4 is where it's first actually built).
 - The eventual **erosion constants** that survive tuning — record the final set and what each visibly controls, the way D13 recorded the generator.
 

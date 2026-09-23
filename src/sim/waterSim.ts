@@ -1,5 +1,6 @@
 import shaderSrc from './water.wgsl?raw';
 import type { GpuContext } from '../render/webgpu';
+import { buildEdgeGhostHeights, edgeSlotCount } from './edgeGhost';
 
 // M3 water simulation — virtual-pipes model on the hex grid. Owns the water
 // field on the GPU from creation onward (see docs/design/05-m3-brief.md §4.1:
@@ -14,6 +15,10 @@ export interface WaterSimOptions {
   heightTexture: GPUTexture;
   /** Initial standing-water depth per cell (from the generator's flood fill). */
   initialWater: Float32Array;
+  /** Generation-time terrain surface height, snapshotted at the edges as the world beyond the map (D17). */
+  initialSurfaceHeight: Float32Array;
+  /** Surface of the off-map sea (D17) — the generator's waterLevel. Edges whose frozen ground is above it are dry land. */
+  seaLevel: number;
   /**
    * Hardcoded test water sources for M3 (brief §2 — real spring placement is
    * a player tool designed after the sim is proven). Up to 8. `ratePerSecond`
@@ -24,7 +29,7 @@ export interface WaterSimOptions {
 }
 
 export interface WaterSimStats {
-  /** Σ depth · cellArea over the whole field. Should track (rain in − evaporation out). */
+  /** Σ depth · cellArea over the whole field. Tracks rain in − evaporation out ± flow through the map edge (D17). */
   totalVolume: number;
   maxDepth: number;
   /** Smallest per-cell depth seen. The clamp should keep this ≥ 0; a negative value means the pipe model is over-draining somewhere. */
@@ -38,8 +43,11 @@ export interface WaterSim {
   currentWaterIndex(): 0 | 1;
   waterBufferA: GPUBuffer;
   waterBufferB: GPUBuffer;
-  /** Re-seed the water field (e.g. after terrain regeneration) and clear flux/velocity. */
-  resetWater(data: Float32Array): void;
+  /**
+   * Re-seed the water field after terrain regeneration and clear flux/velocity.
+   * Also re-freezes the world beyond the edge from the new terrain (D17).
+   */
+  resetWater(data: Float32Array, surfaceHeight: Float32Array, seaLevel: number): void;
   setRain(enabled: boolean, ratePerSecond?: number): void;
   setEvaporation(ratePerSecond: number): void;
   /** Non-blocking volume/max-depth readback; the callback fires a frame or two later. No-op if one is already in flight. */
@@ -79,7 +87,7 @@ const FLUX_DAMPING = 1.0;
 
 export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim {
   const { device } = gpu;
-  const { fieldCols, fieldRows, hexSize, heightTexture, initialWater } = opts;
+  const { fieldCols, fieldRows, hexSize, heightTexture, initialWater, initialSurfaceHeight } = opts;
   const cellCount = fieldCols * fieldRows;
 
   if (opts.springs && opts.springs.length > 8) {
@@ -103,17 +111,25 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
   const fluxBuffer = makeStorage(cellCount * 6);
   const velocityBuffer = makeStorage(cellCount * 2);
   const waterBuffers: [GPUBuffer, GPUBuffer] = [waterBufferA, waterBufferB];
+  const ghostBuffer = makeStorage(edgeSlotCount(fieldCols, fieldRows));
+  device.queue.writeBuffer(
+    ghostBuffer,
+    0,
+    buildEdgeGhostHeights(initialSurfaceHeight, fieldCols, fieldRows) as Float32Array<ArrayBuffer>
+  );
 
   device.queue.writeBuffer(waterBufferA, 0, initialWater as Float32Array<ArrayBuffer>);
   // waterBufferB, flux, velocity start zeroed per the WebGPU spec.
 
   // --- params uniform ------------------------------------------------------
-  // Layout must match `struct Params` in water.wgsl exactly (176 bytes):
+  // Layout must match `struct Params` in water.wgsl exactly (192 bytes):
   //   f32 dt, rainRate, rainEnabled, evapRate,
   //   f32 gravity, pipeArea, pipeLength, cellArea,
   //   u32 fieldCols, fieldRows, springCount; f32 fluxDamping,
   //   vec4<f32> springs[8]   (col, row, ratePerSec, _)
-  const paramsBytes = new ArrayBuffer(176);
+  //   f32 seaLevel           (+ 12 bytes padding to the struct's 16-byte alignment)
+  const PARAMS_SIZE = 192;
+  const paramsBytes = new ArrayBuffer(PARAMS_SIZE);
   const pf = new Float32Array(paramsBytes);
   const pu = new Uint32Array(paramsBytes);
   pf[4] = GRAVITY;
@@ -123,6 +139,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
   pu[8] = fieldCols;
   pu[9] = fieldRows;
   pf[11] = FLUX_DAMPING;
+  pf[44] = opts.seaLevel;
 
   let rainEnabled = true;
   let rainRate = DEFAULT_RAIN_RATE;
@@ -142,7 +159,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
   });
 
   const paramsBuffer = device.createBuffer({
-    size: 176,
+    size: PARAMS_SIZE,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
   });
 
@@ -155,6 +172,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
       { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
       { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+      { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
     ],
   });
 
@@ -175,6 +193,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
         { binding: 3, resource: { buffer: dst } },
         { binding: 4, resource: { buffer: fluxBuffer } },
         { binding: 5, resource: { buffer: velocityBuffer } },
+        { binding: 6, resource: { buffer: ghostBuffer } },
       ],
     });
   }
@@ -269,8 +288,14 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
     statsCallback = callback;
   }
 
-  function resetWater(data: Float32Array): void {
+  function resetWater(data: Float32Array, surfaceHeight: Float32Array, seaLevel: number): void {
     device.queue.writeBuffer(waterBufferA, 0, data as Float32Array<ArrayBuffer>);
+    device.queue.writeBuffer(
+      ghostBuffer,
+      0,
+      buildEdgeGhostHeights(surfaceHeight, fieldCols, fieldRows) as Float32Array<ArrayBuffer>
+    );
+    pf[44] = seaLevel; // uploaded with the next step's writeParams
     const encoder = device.createCommandEncoder();
     encoder.clearBuffer(waterBufferB);
     encoder.clearBuffer(fluxBuffer);
