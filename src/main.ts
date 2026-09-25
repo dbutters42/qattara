@@ -8,7 +8,8 @@ import { createWaterPipeline } from './render/waterPipeline';
 import { createFrameRenderer } from './render/frame';
 import { createCursorPipeline, CURSOR_RING_SEGMENTS } from './render/cursorPipeline';
 import { sampleHeightField } from './terrain/sample';
-import { generateTerrain, type TerrainGenParams } from './terrain/generator';
+import { generateTerrain, type GeneratedTerrain, type TerrainGenParams } from './terrain/generator';
+import { buildErodeDemoTerrain, ERODE_DEMO_SEA_LEVEL, ERODE_DEMO_SPRING } from './terrain/erodeDemo';
 import { OrbitCamera } from './camera/orbitCamera';
 import { createControlPanel } from './ui/controls';
 import { createToolbar } from './ui/toolbar';
@@ -74,6 +75,10 @@ const NO_SEA = -1e30;
 
 const URL_PARAMS = new URLSearchParams(location.search);
 const DEMO_DAMMING = URL_PARAMS.get('demo') === 'dam';
+// M4 erosion scenario (src/terrain/erodeDemo.ts): hand-built plateau → slope
+// → sea with one spring, rain and evaporation off. Watch a channel cut down
+// the slope and a delta build at the shore.
+const DEMO_ERODE = URL_PARAMS.get('demo') === 'erode';
 
 // Debug overrides for the M3 §3 conservation / stability check — there's no
 // player rain/evaporation UI yet (brief §2). `?rain=on|off` / `?evap=on|off`
@@ -86,7 +91,10 @@ const RAIN_OVERRIDE = URL_PARAMS.get('rain'); // 'on' | 'off' | null
 const EVAP_OVERRIDE = URL_PARAMS.get('evap'); // 'on' | 'off' | null
 const TERRAIN_PARAMS: TerrainGenParams = DEMO_DAMMING
   ? { ...DEFAULT_TERRAIN_PARAMS, ...DAMMING_DEMO_PARAMS }
-  : { ...DEFAULT_TERRAIN_PARAMS };
+  : DEMO_ERODE
+    ? { ...DEFAULT_TERRAIN_PARAMS, waterLevel: ERODE_DEMO_SEA_LEVEL } // the Terrain panel's sliders start from here if touched
+    : { ...DEFAULT_TERRAIN_PARAMS };
+const SCENARIO_LABEL = DEMO_DAMMING ? 'DAM DEMO (?demo=dam)' : DEMO_ERODE ? 'ERODE DEMO (?demo=erode)' : 'default';
 
 // Diagnostics come up before anything else. On iPad there is no Web
 // Inspector without a Mac, so this overlay — not a debugger — is how a
@@ -111,7 +119,9 @@ async function main() {
   }
 
   diagnostics.setDeviceInfo([
-    `scenario: ${DEMO_DAMMING ? 'DAM DEMO (?demo=dam)' : 'default'} — seed ${TERRAIN_PARAMS.seed}, rug ${TERRAIN_PARAMS.ruggedness}`,
+    DEMO_ERODE
+      ? `scenario: ${SCENARIO_LABEL} — hand-built slope, spring ${ERODE_DEMO_SPRING.ratePerSecond}/s`
+      : `scenario: ${SCENARIO_LABEL} — seed ${TERRAIN_PARAMS.seed}, rug ${TERRAIN_PARAMS.ruggedness}`,
     ...describeAdapter(gpu.adapter, gpu.device),
   ]);
 
@@ -122,7 +132,9 @@ async function main() {
   });
 
   function generateAndPack(params: TerrainGenParams) {
-    const terrainData = generateTerrain(params);
+    return pack(generateTerrain(params));
+  }
+  function pack(terrainData: GeneratedTerrain) {
     const surfaceHeight = new Float32Array(FIELD_SIZE * FIELD_SIZE);
     for (let i = 0; i < surfaceHeight.length; i++) {
       surfaceHeight[i] = terrainData.rock[i]! + terrainData.earth[i]! + terrainData.sand[i]!;
@@ -130,7 +142,7 @@ async function main() {
     return { terrainData, surfaceHeight };
   }
 
-  const initial = generateAndPack(TERRAIN_PARAMS);
+  const initial = DEMO_ERODE ? pack(buildErodeDemoTerrain(FIELD_SIZE)) : generateAndPack(TERRAIN_PARAMS);
   let currentSurfaceHeight = initial.surfaceHeight;
   let currentTerrainData: MaterialArrays = initial.terrainData;
   let currentSeaLevel = TERRAIN_PARAMS.waterLevel; // hinge of the hypsometric relief tint; tracks the water-level slider
@@ -169,7 +181,7 @@ async function main() {
     // The damming demo has no off-map sea either — the spring must stay the
     // only inflow — so every edge is dry land (water can still drain off).
     seaLevel: DEMO_DAMMING ? NO_SEA : TERRAIN_PARAMS.waterLevel,
-    springs: DEMO_DAMMING ? [DAMMING_DEMO_SPRING] : undefined,
+    springs: DEMO_DAMMING ? [DAMMING_DEMO_SPRING] : DEMO_ERODE ? [ERODE_DEMO_SPRING] : undefined,
   });
   // Global rain (on by default in the sim) swamps the whole map and hides the
   // channel — the damming demo wants the spring to be the only inflow.
@@ -178,7 +190,7 @@ async function main() {
   // throughflow reaching the front, and the front stops advancing partway —
   // looks like the water "won't fill the channel". Off, it pools and rises
   // until it surmounts obstacles, which is the behaviour the demo is showing.
-  if (DEMO_DAMMING) {
+  if (DEMO_DAMMING || DEMO_ERODE) {
     sim.setRain(false);
     sim.setEvaporation(0);
   }
