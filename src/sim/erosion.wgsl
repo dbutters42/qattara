@@ -10,6 +10,8 @@
 //   cs_erode    — pass 4: pick up / set down material, in place
 //   cs_advect   — pass 5: move suspended material with the water flux, A -> B
 //   cs_compose  — height/earth/sand buffers -> the textures everything reads
+//   cs_thermal  — pass 7, every Nth tick: over-steep loose material slumps
+//                 (reads the composed textures, then compose runs again)
 // Plus, off the per-tick path:
 //   cs_drop     — hydraulic switched off: suspended load settles where it is
 //   cs_reduce   — per-row sums/extremes for the conservation HUD
@@ -33,6 +35,10 @@ struct Params {
   fieldCols: u32,
   fieldRows: u32,
   recordStats: u32,  // 1 on ticks whose stats get read back
+  talusSand: f32,    // max stable height drop to a neighbour for sand = tan(θ_sand) · pipeLength
+  talusEarth: f32,   // same for earth
+  slumpStep: f32,    // fraction of the excess moved per thermal pass (Kt · thermal dt, ≤ 1)
+  _pad: f32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -54,6 +60,8 @@ struct Params {
 @group(0) @binding(16) var earthOut: texture_storage_2d<r32float, write>;
 @group(0) @binding(17) var sandOut: texture_storage_2d<r32float, write>;
 @group(0) @binding(18) var<storage, read_write> partials: array<vec4<f32>>; // 2 per row
+@group(0) @binding(19) var earthTex: texture_2d<f32>;                    // composed snapshot, for cs_thermal
+@group(0) @binding(20) var sandTex: texture_2d<f32>;
 
 fn inField(gid: vec3<u32>) -> bool {
   return gid.x < params.fieldCols && gid.y < params.fieldRows;
@@ -224,6 +232,107 @@ fn cs_compose(@builtin(global_invocation_id) gid: vec3<u32>) {
   textureStore(heightOut, t, vec4<f32>(rock[i] + e + s, 0.0, 0.0, 0.0));
   textureStore(earthOut, t, vec4<f32>(e, 0.0, 0.0, 0.0));
   textureStore(sandOut, t, vec4<f32>(s, 0.0, 0.0, 0.0));
+}
+
+// ---------------------------------------------------------------------------
+// Pass 7 — thermal erosion (slumping). Loose material steeper than it can
+// stand slides downhill until it can. Its own switch, separate from
+// hydraulic erosion (D22).
+//
+// A cell's top material is sand if it has any sand, else earth; bare rock
+// never moves. For each lower neighbour, excess = drop − talus. The cell
+// sends slumpStep · ½ · (largest excess) — ½ because lowering one side and
+// raising the other closes the gap twice as fast — capped at what it has,
+// split among the over-steep neighbours in proportion to their excess.
+//
+// Gather form: every cell recomputes each neighbour's send with the same
+// function on the same snapshot (the composed textures), so a neighbour's
+// loss and the receivers' gains are the same numbers — mass is conserved by
+// construction, no scatter or atomics. Reads the snapshot, writes only its
+// own cell's buffer entries, and the loss is capped by the snapshot amount
+// (= the current amount, since compose just ran), so nothing goes negative.
+
+const MIN_SLUMP = 1e-4; // world units (0.1 mm)
+
+struct Slump {
+  amount: f32,            // total sent
+  isSand: bool,
+  excess: array<f32, 6>,  // per direction, 0 if not over-steep
+  excessSum: f32,
+};
+
+fn slumpFrom(col: u32, row: u32) -> Slump {
+  var out: Slump;
+  out.amount = 0.0;
+  out.isSand = false;
+  out.excessSum = 0.0;
+  for (var d = 0u; d < 6u; d = d + 1u) { out.excess[d] = 0.0; }
+
+  let t = vec2<i32>(i32(col), i32(row));
+  let s = textureLoad(sandTex, t, 0).r;
+  let e = textureLoad(earthTex, t, 0).r;
+  if (s <= 0.0 && e <= 0.0) { return out; } // bare rock
+  out.isSand = s > 0.0;
+  let talus = select(params.talusEarth, params.talusSand, out.isSand);
+  let available = select(e, s, out.isSand);
+
+  let h = textureLoad(heightTex, t, 0).r;
+  var maxExcess = 0.0;
+  for (var d = 0u; d < 6u; d = d + 1u) {
+    let ni = neighborIndex(col, row, d, params.fieldCols, params.fieldRows);
+    if (ni < 0) { continue; } // nothing slumps off the map
+    let x = (h - textureLoad(heightTex, texelOf(ni), 0).r) - talus;
+    if (x > 0.0) {
+      out.excess[d] = x;
+      out.excessSum = out.excessSum + x;
+      maxExcess = max(maxExcess, x);
+    }
+  }
+  var amount = min(params.slumpStep * 0.5 * maxExcess, available);
+  // At rest below a minimum move. Without this, a settled pile creeps
+  // forever by float-dust amounts — and at that size a tall sender's
+  // subtraction rounds away while the receivers' gains don't, so material
+  // is slowly *created* (seen headless: steady one-way drift). Leaves slopes
+  // at most ~MIN_SLUMP / slumpStep steeper than talus — invisible.
+  if (amount < MIN_SLUMP) { amount = 0.0; }
+  out.amount = amount;
+  return out;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cs_thermal(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (!inField(gid)) { return; }
+  let i = gid.y * params.fieldCols + gid.x;
+
+  var dSand = 0.0;
+  var dEarth = 0.0;
+
+  let mine = slumpFrom(gid.x, gid.y);
+  if (mine.amount > 0.0) {
+    if (mine.isSand) { dSand = dSand - mine.amount; } else { dEarth = dEarth - mine.amount; }
+  }
+
+  for (var d = 0u; d < 6u; d = d + 1u) {
+    let ni = neighborIndex(gid.x, gid.y, d, params.fieldCols, params.fieldRows);
+    if (ni < 0) { continue; }
+    let n = texelOf(ni);
+    let theirs = slumpFrom(u32(n.x), u32(n.y));
+    let toMe = theirs.excess[(d + 3u) % 6u]; // their direction toward us
+    if (theirs.amount > 0.0 && toMe > 0.0) {
+      let share = theirs.amount * (toMe / theirs.excessSum);
+      if (theirs.isSand) { dSand = dSand + share; } else { dEarth = dEarth + share; }
+    }
+  }
+
+  if (params.recordStats != 0u) {
+    let change = abs(dSand + dEarth);
+    if (change > 0.0) {
+      atomicMax(&statsAtomic[1], bitcast<u32>(change));
+    }
+  }
+
+  sand[i] = sand[i] + dSand;
+  earth[i] = earth[i] + dEarth;
 }
 
 // Hydraulic erosion switched off (D22): whatever the water was carrying

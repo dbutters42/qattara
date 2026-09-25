@@ -5,7 +5,7 @@ import { DEFAULT_EROSION_SETTINGS, type ErosionSettings } from '../sim/erosionSi
 // fast-forward. A *dev* surface — player-facing erosion controls are designed
 // after the sim is proven (brief §2). Styled to match the Terrain panel.
 
-type NumericKey = Exclude<keyof ErosionSettings, 'hydraulic'>;
+type NumericKey = Exclude<keyof ErosionSettings, 'hydraulic' | 'slumping'>;
 
 interface SliderSpec {
   key: NumericKey;
@@ -23,6 +23,10 @@ const SLIDERS: SliderSpec[] = [
   { key: 'deposit', label: 'Deposit', min: 0.01, max: 10, log: true },
   { key: 'minTilt', label: 'Min tilt', min: 0, max: 0.2, log: false },
   { key: 'fullDepth', label: 'Full depth', min: 0.005, max: 2, log: true },
+  { key: 'talusSandDeg', label: 'Sand angle°', min: 10, max: 60, log: false },
+  { key: 'talusEarthDeg', label: 'Earth angle°', min: 10, max: 80, log: false },
+  // Kt · (4 ticks / 30 Hz) is capped at 1 in the sim, so ~7.5 is the fastest meaningful rate.
+  { key: 'slumpRate', label: 'Slump rate', min: 0.05, max: 7.5, log: true },
 ];
 
 const SPEEDS = [1, 2, 4, 8] as const;
@@ -97,8 +101,11 @@ export function createDevPanel(settings: ErosionSettings, initialRain: boolean, 
     row.appendChild(btn);
   }
 
-  addToggle('Erosion', settings.hydraulic, (on) => {
+  addToggle('Hydraulic', settings.hydraulic, (on) => {
     settings.hydraulic = on;
+  });
+  addToggle('Slumping', settings.slumping, (on) => {
+    settings.slumping = on;
   });
   addToggle('Rain', initialRain, (on) => callbacks.onRain(on));
 
@@ -168,6 +175,7 @@ export function createDevPanel(settings: ErosionSettings, initialRain: boolean, 
 
 function formatValue(v: number): string {
   if (v === 0) return '0';
+  if (v >= 10) return v.toFixed(1);
   if (v >= 1) return v.toFixed(2);
   return v.toPrecision(2);
 }

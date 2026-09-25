@@ -37,6 +37,14 @@ export interface ErosionSettings {
   minTilt: number;
   /** Water depth at which carrying capacity reaches full strength. */
   fullDepth: number;
+  /** Master switch for pass 7, thermal slumping — independent of `hydraulic` (D22). */
+  slumping: boolean;
+  /** Steepest slope sand holds, degrees (angle of repose). */
+  talusSandDeg: number;
+  /** Steepest slope earth holds, degrees. */
+  talusEarthDeg: number;
+  /** Kt — how fast over-steep material slides, 1/s. Capped so one thermal pass never moves more than the excess. */
+  slumpRate: number;
 }
 
 // First guesses — expected to move a lot once watched on-device. Tuning is
@@ -52,7 +60,14 @@ export const DEFAULT_EROSION_SETTINGS: ErosionSettings = {
   deposit: 0.5,
   minTilt: 0.02,
   fullDepth: 0.1,
+  slumping: true,
+  talusSandDeg: 34,
+  talusEarthDeg: 45,
+  slumpRate: 2,
 };
+
+/** Thermal runs every Nth tick (brief §4.3) — slumping is slow and doesn't need 30 Hz. */
+export const THERMAL_EVERY = 4;
 
 export interface ErosionStats {
   /** Σ (earth + sand + suspended) · cellArea — the "loose" material. Rock is excluded: erosion never touches it. */
@@ -62,8 +77,10 @@ export interface ErosionStats {
   /** Total material carried off the map edge since the last reset · cellArea. */
   exportedVolume: number;
   maxSuspended: number;
-  /** Largest single-cell bed change in one tick, since the last stats sample. */
+  /** Largest single-cell bed change from hydraulic erosion in one tick. */
   maxTickChange: number;
+  /** Largest single-cell change from one slumping pass. */
+  maxSlumpChange: number;
   /** Smallest earth / sand / suspended value anywhere — all must stay ≥ 0. */
   minEarth: number;
   minSand: number;
@@ -86,7 +103,7 @@ export interface ErosionSimOptions {
 export interface ErosionSim {
   /** Live-tunable; read every tick. */
   settings: ErosionSettings;
-  /** Encode this tick's erosion passes after the water passes. No-op while hydraulic is off. */
+  /** Encode this tick's erosion passes after the water passes. No-op while both switches are off. */
   encode(encoder: GPUCommandEncoder, dt: number, waterBufs: WaterTickBuffers, timer: GpuTimer): void;
   /** Call straight after the tick's queue.submit(). */
   afterSubmit(): void;
@@ -134,15 +151,15 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
   device.queue.writeBuffer(sandBuffer, 0, opts.sand as Float32Array<ArrayBuffer>);
 
   // --- params uniform ------------------------------------------------------
-  // Must match `struct Params` in erosion.wgsl: 9 f32, 3 u32 = 48 bytes.
-  const paramsBytes = new ArrayBuffer(48);
+  // Must match `struct Params` in erosion.wgsl: 9 f32, 3 u32, 4 f32 = 64 bytes.
+  const paramsBytes = new ArrayBuffer(64);
   const pf = new Float32Array(paramsBytes);
   const pu = new Uint32Array(paramsBytes);
   pf[7] = pipeLength;
   pf[8] = cellArea;
   pu[9] = fieldCols;
   pu[10] = fieldRows;
-  const paramsBuffer = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  const paramsBuffer = device.createBuffer({ size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 
   function writeParams(dt: number, recordStats: boolean): void {
     pf[0] = dt;
@@ -153,6 +170,10 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
     pf[5] = settings.minTilt;
     pf[6] = Math.max(settings.fullDepth, 1e-6);
     pu[11] = recordStats ? 1 : 0;
+    const toRad = Math.PI / 180;
+    pf[12] = Math.tan(settings.talusSandDeg * toRad) * pipeLength;
+    pf[13] = Math.tan(settings.talusEarthDeg * toRad) * pipeLength;
+    pf[14] = Math.min(settings.slumpRate * dt * THERMAL_EVERY, 1);
     device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
   }
 
@@ -167,6 +188,7 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
   const composePipeline = pipeline('cs_compose');
   const dropPipeline = pipeline('cs_drop');
   const reducePipeline = pipeline('cs_reduce');
+  const thermalPipeline = pipeline('cs_thermal');
 
   const buf = (binding: number, buffer: GPUBuffer): GPUBindGroupEntry => ({ binding, resource: { buffer } });
   const params = buf(0, paramsBuffer);
@@ -221,6 +243,18 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
       { binding: 17, resource: opts.sandTexture.createView() },
     ],
   });
+  const thermalGroup = device.createBindGroup({
+    layout: thermalPipeline.getBindGroupLayout(0),
+    entries: [
+      params,
+      { binding: 1, resource: heightView },
+      buf(3, earthBuffer),
+      buf(4, sandBuffer),
+      buf(14, statsAtomicBuffer),
+      { binding: 19, resource: opts.earthTexture.createView() },
+      { binding: 20, resource: opts.sandTexture.createView() },
+    ],
+  });
   const dropGroups = [0, 1].map((s) =>
     device.createBindGroup({
       layout: dropPipeline.getBindGroupLayout(0),
@@ -246,6 +280,7 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
 
   let susp: 0 | 1 = 0; // which suspended buffers hold the current load
   let wasHydraulic = settings.hydraulic;
+  let tickCount = 0;
   let dirty = false;
 
   // --- readbacks ------------------------------------------------------------
@@ -264,8 +299,8 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
   let mapMirror = false; // mirror copy encoded this tick; map it once the submit lands
   let mirrorCallback: ((earth: Float32Array, sand: Float32Array) => void) | null = null;
 
-  function encodeCompose(encoder: GPUCommandEncoder, timer: GpuTimer): void {
-    const pass = encoder.beginComputePass(timer.pass('compose'));
+  function encodeCompose(encoder: GPUCommandEncoder, timer: GpuTimer, label = 'compose'): void {
+    const pass = encoder.beginComputePass(timer.pass(label));
     pass.setPipeline(composePipeline);
     pass.setBindGroup(0, composeGroup);
     pass.dispatchWorkgroups(wgX, wgY);
@@ -274,12 +309,14 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
 
   function encode(encoder: GPUCommandEncoder, dt: number, waterBufs: WaterTickBuffers, timer: GpuTimer): void {
     const hydraulic = settings.hydraulic;
-    const collectStats = statsState === 'requested';
+    const thermalTick = settings.slumping && (tickCount + 1) % THERMAL_EVERY === 0;
+    // With slumping on, sample stats on a thermal tick so the slump readout
+    // is real (waits at most THERMAL_EVERY − 1 ticks).
+    const collectStats = statsState === 'requested' && (!settings.slumping || thermalTick);
     writeParams(dt, collectStats);
+    if (collectStats) encoder.clearBuffer(statsAtomicBuffer);
 
     if (hydraulic) {
-      if (collectStats) encoder.clearBuffer(statsAtomicBuffer);
-
       let pass = encoder.beginComputePass(timer.pass('erode'));
       pass.setPipeline(erodePipeline);
       pass.setBindGroup(0, erodeGroups[susp]![waterBufs.after]!);
@@ -308,8 +345,21 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
     }
     wasHydraulic = hydraulic;
 
+    // Pass 7 reads the composed textures as its snapshot — current here
+    // whether or not hydraulic ran (brush edits write textures and buffers
+    // alike) — then compose runs again so the next tick sees the result.
+    tickCount++;
+    if (thermalTick) {
+      const pass = encoder.beginComputePass(timer.pass('slump'));
+      pass.setPipeline(thermalPipeline);
+      pass.setBindGroup(0, thermalGroup);
+      pass.dispatchWorkgroups(wgX, wgY);
+      pass.end();
+      encodeCompose(encoder, timer, 'compose₂');
+      dirty = true;
+    }
+
     if (collectStats) {
-      if (!hydraulic) encoder.clearBuffer(statsAtomicBuffer); // nothing eroded this tick
       const pass = encoder.beginComputePass();
       pass.setPipeline(reducePipeline);
       pass.setBindGroup(0, reduceGroups[susp]!);
@@ -359,14 +409,15 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
           }
           let exported = 0;
           for (let k = 0; k < perimeter; k++) exported += exp[k]!;
-          const maxChange = new Float32Array(new Uint32Array([atom[0]!]).buffer)[0]!;
+          const asFloat = new Float32Array(new Uint32Array([atom[0]!, atom[1]!]).buffer);
           statsReadback.unmap();
           statsCallback?.({
             looseVolume: loose * cellArea,
             suspendedVolume: suspended * cellArea,
             exportedVolume: exported * cellArea,
             maxSuspended: maxSusp,
-            maxTickChange: maxChange,
+            maxTickChange: asFloat[0]!,
+            maxSlumpChange: asFloat[1]!,
             minEarth: minE,
             minSand: minS,
             minSuspended: minSusp,

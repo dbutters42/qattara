@@ -496,9 +496,9 @@ async function main() {
       const drift = massBaseline.total !== 0 ? ((total - massBaseline.total) / Math.abs(massBaseline.total)) * 100 : 0;
       const negative = Math.min(e.minEarth, e.minSand, e.minSuspended);
       erosionLine =
-        `erosion: ${erosion.settings.hydraulic ? 'on' : 'off'} | loose ${e.looseVolume.toFixed(0)} drift ${drift >= 0 ? '+' : ''}${drift.toExponential(1)}%` +
+        `erosion: hydraulic ${erosion.settings.hydraulic ? 'on' : 'off'}, slump ${erosion.settings.slumping ? 'on' : 'off'} | loose ${e.looseVolume.toFixed(0)} drift ${drift >= 0 ? '+' : ''}${drift.toExponential(1)}%` +
         ` | susp ${e.suspendedVolume.toFixed(1)} max ${e.maxSuspended.toPrecision(2)}` +
-        ` | out ${e.exportedVolume.toFixed(1)} | Δmax ${e.maxTickChange.toPrecision(2)}/tick` +
+        ` | out ${e.exportedVolume.toFixed(1)} | Δmax ${e.maxTickChange.toPrecision(2)}/tick, slump ${e.maxSlumpChange.toPrecision(2)}` +
         (negative < 0 ? ` | NEGATIVE ${negative.toPrecision(2)}` : '');
     });
   }
