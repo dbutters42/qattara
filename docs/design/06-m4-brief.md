@@ -13,6 +13,8 @@
 
 **Slump cost, on-device iPad 1024²:** first version (one gather pass, each cell recomputing all six neighbours' full slump plans) **5.61 ms** per thermal tick. Rewritten as two passes — `cs_slumpPlan` stores each cell's send as k = amount/Σexcess, `cs_slumpApply` gathers |k_n|·excess — **0.45 + 0.50 = 0.95 ms**, ~6× faster, identical results, still conservative by construction (`fdacee5`). Amortised over THERMAL_EVERY = 4: ~0.25 ms/tick. Note: the headless software rasterizer (Dawn → lavapipe on milliwaysserver) showed only ~22 % — **it's a correctness tool, not a performance proxy**; it also segfaults at ≥ 384² fields, so headless runs are limited to ≤ 256².
 
+**Headless checks kept in the repo (2026-09-25):** `npm run test:gpu` — `tools/gpu-check/hydraulic.ts` (3 slope scenarios: springs, springs+rain+sea, toggle-off mid-run) and `slump.ts` (tower test), 22 pass/fail checks. Mutation-tested: removing the erode clamp fails "nothing negative" in every scenario — note conservation alone would *not* catch it (negative sand still sums correctly), which is why both checks exist.
+
 **What normal drift looks like on the HUD:** the hydraulic passes show a slow upward creep of ~1e-5 % per ~30 sim-seconds on the 128² test (f32 accumulation over millions of cell updates). Two suspected sources were tested and ruled out (bed-side booking of erode/deposit transfers; sub-ulp advection fractions) — neither changed it, so neither was kept. **Treat |drift| under ~1e-3 % as float noise; a broken clamp shows as whole-percent drift within seconds, or a NEGATIVE flag.**
 
 **Agreed with Dane 2026-09-25: ~3× is enough for now** — don't optimise until thermal is in and tuning has settled.
