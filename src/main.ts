@@ -444,7 +444,14 @@ async function main() {
   // run behaves exactly like a real-time one, just sooner (M4 brief §1).
   const SIM_TICK_HZ = 30;
   const SIM_TICK_DT = 1 / SIM_TICK_HZ;
-  const MAX_STEPS_PER_FRAME = 5; // at 1×; scales with speed
+  // Catch-up cap: only about one tick per frame beyond what the chosen
+  // speed needs at 60 fps. A generous cap (it was 5 × speed) turns one slow
+  // frame into a death spiral — the backlog makes the next frame slower
+  // still, which grows the backlog. Found on-device 2026-09-25: 8× fell to
+  // single-digit fps and 4× lagged under the brush. With this cap, a GPU that
+  // can't keep up runs the sim slower than asked instead of dropping frames;
+  // the HUD's "actual ×" shows what's really being achieved.
+  const maxStepsPerFrame = (speed: number) => Math.ceil((speed * SIM_TICK_HZ) / 60) + 1;
   const STATS_INTERVAL_MS = 1000;
   const MIRROR_INTERVAL_MS = 1000;
   let simAccumulator = 0;
@@ -531,7 +538,7 @@ async function main() {
     }
     refreshMirror(now);
 
-    const maxSteps = MAX_STEPS_PER_FRAME * simSpeed;
+    const maxSteps = maxStepsPerFrame(simSpeed);
     let steps = 0;
     while (simAccumulator >= SIM_TICK_DT && steps < maxSteps) {
       runTick(sampleNext);
@@ -554,7 +561,7 @@ async function main() {
       ? `gpu ms: ${timings.map((t) => `${t.label} ${t.ms.toFixed(2)}`).join(' · ')}`
       : `gpu ms: ${gpuTimer.perPass ? 'waiting' : 'n/a'}`;
     diagnostics.setSimStats(
-      `water: vol ${lastVolume.toFixed(0)} | depth ${lastMinDepth.toFixed(2)}..${lastMaxDepth.toFixed(2)} | ${ticksPerSecond} ticks/s (${simSpeed}×)\n` +
+      `water: vol ${lastVolume.toFixed(0)} | depth ${lastMinDepth.toFixed(2)}..${lastMaxDepth.toFixed(2)} | ${ticksPerSecond} ticks/s — ${simSpeed}× asked, ${(ticksPerSecond / SIM_TICK_HZ).toFixed(1)}× actual\n` +
         `${erosionLine}\n${gpuLine}`
     );
   }
