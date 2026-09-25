@@ -146,6 +146,7 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
   const perimeter = edgeSlotCount(fieldCols, fieldRows);
   const exportedBuffer = makeStorage(perimeter * 4, GPUBufferUsage.COPY_SRC);
   const statsAtomicBuffer = makeStorage(16, GPUBufferUsage.COPY_SRC);
+  const slumpKBuffer = makeStorage(cellCount * 4); // pass 7 plan -> apply
   const partialsBuffer = makeStorage(fieldRows * 2 * 16, GPUBufferUsage.COPY_SRC);
 
   device.queue.writeBuffer(rockBuffer, 0, opts.rock as Float32Array<ArrayBuffer>);
@@ -190,7 +191,8 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
   const composePipeline = pipeline('cs_compose');
   const dropPipeline = pipeline('cs_drop');
   const reducePipeline = pipeline('cs_reduce');
-  const thermalPipeline = pipeline('cs_thermal');
+  const slumpPlanPipeline = pipeline('cs_slumpPlan');
+  const slumpApplyPipeline = pipeline('cs_slumpApply');
 
   const buf = (binding: number, buffer: GPUBuffer): GPUBindGroupEntry => ({ binding, resource: { buffer } });
   const params = buf(0, paramsBuffer);
@@ -245,16 +247,29 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
       { binding: 17, resource: opts.sandTexture.createView() },
     ],
   });
-  const thermalGroup = device.createBindGroup({
-    layout: thermalPipeline.getBindGroupLayout(0),
+  const earthView = opts.earthTexture.createView();
+  const sandView = opts.sandTexture.createView();
+  const slumpPlanGroup = device.createBindGroup({
+    layout: slumpPlanPipeline.getBindGroupLayout(0),
+    entries: [
+      params,
+      { binding: 1, resource: heightView },
+      { binding: 19, resource: earthView },
+      { binding: 20, resource: sandView },
+      buf(21, slumpKBuffer),
+    ],
+  });
+  const slumpApplyGroup = device.createBindGroup({
+    layout: slumpApplyPipeline.getBindGroupLayout(0),
     entries: [
       params,
       { binding: 1, resource: heightView },
       buf(3, earthBuffer),
       buf(4, sandBuffer),
       buf(14, statsAtomicBuffer),
-      { binding: 19, resource: opts.earthTexture.createView() },
-      { binding: 20, resource: opts.sandTexture.createView() },
+      { binding: 19, resource: earthView },
+      { binding: 20, resource: sandView },
+      buf(21, slumpKBuffer),
     ],
   });
   const dropGroups = [0, 1].map((s) =>
@@ -352,9 +367,14 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
     // alike) — then compose runs again so the next tick sees the result.
     tickCount++;
     if (thermalTick) {
-      const pass = encoder.beginComputePass(timer.pass('slump'));
-      pass.setPipeline(thermalPipeline);
-      pass.setBindGroup(0, thermalGroup);
+      let pass = encoder.beginComputePass(timer.pass('slump plan'));
+      pass.setPipeline(slumpPlanPipeline);
+      pass.setBindGroup(0, slumpPlanGroup);
+      pass.dispatchWorkgroups(wgX, wgY);
+      pass.end();
+      pass = encoder.beginComputePass(timer.pass('slump apply'));
+      pass.setPipeline(slumpApplyPipeline);
+      pass.setBindGroup(0, slumpApplyGroup);
       pass.dispatchWorkgroups(wgX, wgY);
       pass.end();
       encodeCompose(encoder, timer, 'compose₂');
