@@ -107,6 +107,8 @@ export interface ErosionSim {
   encode(encoder: GPUCommandEncoder, dt: number, waterBufs: WaterTickBuffers, timer: GpuTimer): void;
   /** Call straight after the tick's queue.submit(). */
   afterSubmit(): void;
+  /** Whether the next encoded tick will run the slumping pass — lets the GPU timer sample a tick that includes it. */
+  nextTickSlumps(): boolean;
   /** Whether the GPU terrain may have diverged from the CPU copy since the last mirror. */
   isDirty(): boolean;
   /** Copy one brushed rectangle of the CPU arrays into the sim's buffers. */
@@ -511,6 +513,7 @@ export function createErosionSim(gpu: GpuContext, opts: ErosionSimOptions): Eros
     encode,
     afterSubmit,
     isDirty: () => dirty,
+    nextTickSlumps: () => settings.slumping && (tickCount + 1) % THERMAL_EVERY === 0,
     uploadRegion,
     resetTerrain,
     requestMirror(callback) {

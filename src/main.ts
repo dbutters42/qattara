@@ -461,6 +461,7 @@ async function main() {
   let statsSecondClock = performance.now();
   let lastStatsAt = 0;
   let lastMirrorAt = 0;
+  let sampleNext = false; // time the next suitable tick on the GPU (can carry over frames)
   let mirrorRetry = false; // last mirror was dropped as stale — fetch again even if nothing's eroded since
   let lastVolume = 0;
   let lastMaxDepth = 0;
@@ -530,7 +531,6 @@ async function main() {
     simAccumulator += Math.min((now - lastSimClock) / 1000, 0.25) * simSpeed;
     lastSimClock = now;
 
-    let sampleNext = false;
     if (now - lastStatsAt >= STATS_INTERVAL_MS) {
       lastStatsAt = now;
       requestStats();
@@ -541,8 +541,11 @@ async function main() {
     const maxSteps = maxStepsPerFrame(simSpeed);
     let steps = 0;
     while (simAccumulator >= SIM_TICK_DT && steps < maxSteps) {
-      runTick(sampleNext);
-      sampleNext = false;
+      // Time a tick that includes slumping when it's on (it runs every 4th
+      // tick), so its cost shows up in the gpu ms line; otherwise any tick.
+      const timeThis = sampleNext && (!erosion.settings.slumping || erosion.nextTickSlumps());
+      runTick(timeThis);
+      if (timeThis) sampleNext = false;
       simAccumulator -= SIM_TICK_DT;
       steps++;
       ticksThisSecond++;
