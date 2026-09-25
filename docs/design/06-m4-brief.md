@@ -7,7 +7,9 @@
 
 ## 0. Progress
 
-Nothing yet. M3 (`05-m3-brief.md`) is the foundation: the pipe model, the `water` / `flux` / `velocity` fields, the 30 Hz accumulator, the conservation readback, the `?demo=` / `?rain=` / `?evap=` debug hooks. M4 adds passes 4, 5 and 7 of `03-outline.md` §3.5 on top of that.
+**2026-09-25 — first slice built (`29a8cd2`), awaiting on-device check.** Passes 4 + 5 (erode/deposit, flux-based advection with edge export), terrain GPU-authoritative via sim-owned buffers + compose-to-textures (§4.1 approach — D23 still to log once on-device confirms it), region-precise brush upload + ~1 s CPU mirror, stroke-local undo, shared `hexGrid.wgsl`, dev panel (hydraulic toggle, rain toggle, 1–8× fast-forward, log sliders), HUD conservation line + per-pass GPU ms. Verified headless on Dawn (software Vulkan, 128² synthetic slope): no validation errors, loose + exported conserved to ~1e-5 % with springs / rain / sea edge / toggle-off mid-run, no negatives. Constants are first guesses — soil cut to rock in ~20 sim-s under a 50/s spring, likely too fast. Not yet built: thermal slumping (pass 7, its own switch per D22), `?demo=erode`.
+
+Previously: nothing. M3 (`05-m3-brief.md`) is the foundation: the pipe model, the `water` / `flux` / `velocity` fields, the 30 Hz accumulator, the conservation readback, the `?demo=` / `?rain=` / `?evap=` debug hooks. M4 adds passes 4, 5 and 7 of `03-outline.md` §3.5 on top of that.
 
 ## 1. What M4 must do
 
