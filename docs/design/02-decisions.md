@@ -241,6 +241,21 @@ Full App Store submission stays deferred until the game is actually worth playin
 
 Total cash cost of the delivery path: **$99/yr.** Everything else is free while the repo stays public.
 
+### D22 — Erosion is built behind a toggle; keep-or-cut decided after watching it run *(2026-09-25)*
+Reviewing the M4 brief, Dane questioned whether erosion/deposition belongs in the toy at all. Fair question: `01-brief.md`'s vision is water that flows and pools and a player who frees, redirects and dams it — erosion was added at the outline stage (`03-outline.md`), not in the original brief. **Decision: build M4 as briefed, but behind a dev toggle, and decide whether erosion stays once Dane has watched it run for a while.**
+
+**Why build it rather than cut it now:** you can't judge a landscape process from a description. The case for it (the Qattara breach widening itself, rivers carving and building deltas unattended, the three materials of D6 actually behaving differently) and the case against (edits that don't persist, 2–4 weeks of High-risk tuning, the M6 uplift obligation) both hinge on how it *feels*, which only running it shows.
+
+**How the toggles work — two independent switches**
+- **Hydraulic erosion** (passes 4 + 5). Off → terrain no longer changes under the water; water (M3) is unaffected. Switching off mid-run deposits all suspended sediment in place, so the solid-mass total stays conserved.
+- **Thermal slumping** (pass 7), switched separately. Loose material over its talus angle slides downhill (sand ~34°, earth ~45°). Split out because slumping alone is a credible end state if hydraulic erosion is cut: it's cheap, it's what makes D6's three materials behave differently, and it doesn't wash away the player's edits the way hydraulic erosion does — it only settles walls steeper than the material can hold.
+- Both off → terrain changes only under the brush, exactly as M3.
+- The GPU terrain-authority shift (§4.1 of `06-m4-brief.md`, now **D23**) happens regardless — it's the foundation, not erosion-specific — so the toggle itself is cheap.
+
+**Caveat on the verdict:** judge a *tuned* build (at least one scenario behaving plausibly), not the first slice. Early constants will look wrong, and that's a tuning signal, not evidence against erosion.
+
+**Seeing long runs:** a dev fast-forward (1×–8× ticks per frame, whole sim) is built into the first slice for exactly this purpose — see `06-m4-brief.md` §1. Expect long fast-forwarded runs to show the world wearing down: with no uplift until M6, flattening is the known end state (`03-outline.md` §6), not a verdict on erosion itself.
+
 ---
 
 ## 2. Parked

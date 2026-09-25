@@ -16,6 +16,8 @@ Nothing yet. M3 (`05-m3-brief.md`) is the foundation: the pipe model, the `water
 - **Thermal erosion (slumping).** Where a material's local slope exceeds its talus angle, it slides downhill until it doesn't. Sand ~34°, earth ~45°, rock effectively never. This is what stops a vertical sand wall standing forever.
 - **Armouring falls out for free.** Because sand erodes preferentially, water strips the sand from a mixed cell and leaves the earth — the channel bed coarsens and erosion slows on its own. No special-case code; it's what the per-material rates produce.
 - **Mass is conserved.** `rock + earth + sand + suspended` over the closed field is constant to float precision when nothing is being added. Terrain never erodes below its rock; suspended sediment never goes negative or runs away.
+- **Erosion is behind two independent toggles (D22).** Whether erosion stays in the toy at all is undecided — Dane decides after watching a tuned build run. **Hydraulic** (passes 4 + 5): off = terrain stops changing under water, water unaffected; switching off mid-run deposits suspended sediment in place (mass conserved). **Thermal slumping** (pass 7): its own switch, since slumping alone is a credible outcome if hydraulic erosion is cut.
+- **Dev fast-forward** *(agreed 2026-09-25)*. A panel control that runs 1× / 2× / 4× / 8× sim ticks per frame — the *whole* sim (water, rain, evaporation, erosion, slumping), not just erosion, since erosion is driven by the water. Exists so Dane can see what erosion does over long runs (D22's verdict needs that) without leaving the iPad on for hours. **Not** a substitute for raising erosion rates: bigger rates make each tick coarser (instability, blockier results); more ticks shows the true behaviour sooner. The ceiling is GPU time per tick — if 8× can't hold 60 fps at 1024², frame rate drops but results don't change; the §5 per-pass timings show where the ceiling is. Dev-only for now; the same machinery is the seed of M6's ambient catch-up sim.
 - **A live tuning panel exists.** The erosion constants (capacity, erode rates, deposit rate, talus angles, thermal rate) are adjustable against the running sim on-device. Tuning *is* the milestone (risk register); the panel is not a polish step to add afterward.
 
 ## 2. Explicitly NOT in M4
@@ -35,7 +37,7 @@ Nothing yet. M3 (`05-m3-brief.md`) is the foundation: the pipe model, the `water
 | Frame rate on iPhone | ≥ 30 fps (the M3 iPhone check is also still outstanding — do both) |
 | Sim resolution | Full 1024 × 1024. Half-res fallback only if profiling forces it. |
 | Tick rate | Fixed 30 Hz, decoupled from render (unchanged from M3). Thermal pass may run every Nth tick. |
-| **Mass conservation** | Rain off, no springs, closed field → total solid mass (`rock+earth+sand+suspended`)·cellArea constant to float precision. **Since D17 the field isn't closed** — water (and so suspended sediment) crosses the map edge. Test on a no-sea map with nothing reaching an edge (as `?demo=dam` does), or account for edge flux explicitly; decide which at M4 start. No cell's earth/sand/suspended goes negative. Nothing oscillates or explodes. |
+| **Mass conservation** | `(rock + earth + sand + suspended + exported)`·cellArea constant to float precision, on **any** map. Since D17 the field isn't closed, so sediment carried off the edge is tallied in `exported` (§4.5) rather than restricting the test to no-sea maps. No cell's earth/sand/suspended goes negative. Nothing oscillates or explodes. |
 | **Armouring** | Run water across a cell of mixed sand+earth → sand depletes first, earth remains, local erosion rate drops as it coarsens. |
 | **Channel incision** | Rain or a spring on a broad slope → a defined channel cuts over sim-minutes (not instantly, not never), and tributaries join it. |
 | **Delta / deposition** | Where moving water enters standing water or a flat → terrain builds outward/upward there; the suspended load drops as the water slows. |
@@ -61,7 +63,7 @@ M3 established the boundary (D15): terrain was CPU-authoritative, the sim only *
 - After the erosion + thermal passes each tick, write the combined surface height (`rock+earth+sand`) into the existing `heightTexture` — a small dedicated pass, or `copyBufferToTexture` (1024×4 = 4096 B/row, already 256-aligned). Optionally refresh the `earth` / `sand` textures too; the relief tint's material term is only ~20% so a frame of staleness there is invisible, but the water sim reads height every tick and must see the current bed.
 - Net effect: the displaced mesh, the relief shader, and the M3 water passes all keep reading textures exactly as they do now. Only the *source* of the height texture changes.
 
-Alternative considered: `heightTexture` etc. as read-write `r32float` storage textures the passes write directly (no buffer copy). Fewer moving parts, but storage-texture read-write support is newer and the buffer path keeps the indexing arithmetic explicit, matching the rest of the sim. **Decide and log as D22** once the first slice works.
+Alternative considered: `heightTexture` etc. as read-write `r32float` storage textures the passes write directly (no buffer copy). Fewer moving parts, but storage-texture read-write support is newer and the buffer path keeps the indexing arithmetic explicit, matching the rest of the sim. **Decide and log as D23** once the first slice works.
 
 ### 4.2 New per-cell state
 
@@ -114,12 +116,12 @@ Two clamps, each "the single most important line" for its pass:
 - **Tilt / gradient uses the parity-correct 6-neighbour arithmetic.** This is the fourth place the same D12 bug can land — after the mesh, the shading, the generator, and M3's flux. Erosion misrouting flow for half the map fails *subtly* (wrong-looking channel patterns, not an obvious artifact). Reuse `storageNeighborIndex` / the `water.wgsl` port; do not rederive.
 - **Talus comparison is against `tan(θ)·pipeLength`**, where `pipeLength = √3·hexSize` — the same centre-to-centre distance the pipe model uses. One constant per material.
 - **Flux-based advection** (§4.3 pass 5) is the hex-friendly choice precisely because it never samples off the grid.
-- **Map edge stays reflective.** Sediment reaching the boundary stops there (no pipe off-field). Fine for M4.
+- **Sediment leaves with its water at the map edge** *(agreed with Dane 2026-09-25 — replaces the pre-D17 "edge stays reflective" line)*. D17's off-field pipes carry water off land edges and to/from the sea ghost; pass 5 treats them like any other pipe for outflow — suspended sediment riding outflowing water leaves the map (off a land edge or into the sea). **Sea inflow carries no sediment.** Rationale: D17's rule — the player reshapes the map, never the world beyond it — so the beyond is a sink, not a wall. A reflective edge would strand sediment against the border and build artificial banks along it. Outgoing sediment is added to a per-cell `exported` accumulator (summed in the HUD readback) so conservation stays checkable.
 
 ### 4.6 Instability watch
 
 The HUD sim line gains:
-- **Total solid mass** `(rock+earth+sand+suspEarth+suspSand)·cellArea` — the erosion analogue of M3's water-volume conservation check. Constant when nothing is added.
+- **Total solid mass** `(rock+earth+sand+suspEarth+suspSand+exported)·cellArea` — the erosion analogue of M3's water-volume conservation check. Constant at all times (brush edits aside). Show `exported` on its own too — it's also a useful read of how much the map is losing to the edges.
 - **Max suspended depth** and **max single-tick terrain change** — early warning of a blow-up before it's visible.
 
 Same non-blocking readback path as M3's volume stat (a reduction copied to a mapped buffer every ~30 ticks, off the hot path).
@@ -137,7 +139,7 @@ Same non-blocking readback path as M3's volume stat (a reduction copied to a map
 
 ## 6. New decisions to log when this settles
 
-- **D22** — how terrain becomes GPU-authoritative: the sim-owns-buffers + texture-writeback approach of §4.1 (vs read-write storage textures), once the first slice confirms it.
+- **D23** — how terrain becomes GPU-authoritative: the sim-owns-buffers + texture-writeback approach of §4.1 (vs read-write storage textures), once the first slice confirms it.
 - Possibly a short decision on **flux-based sediment advection on hex** if the reasoning turns out worth preserving (it's the natural consequence of D8 + D12, but M4 is where it's first actually built).
 - The eventual **erosion constants** that survive tuning — record the final set and what each visibly controls, the way D13 recorded the generator.
 
