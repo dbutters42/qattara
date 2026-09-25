@@ -1,7 +1,7 @@
 # 00 — STATE (read this first)
 
 **Project: Qattara** — working title.
-**Last updated:** 2026-09-23 (D17 map-edge sea/drain boundary added and verified ahead of M4. Previously: M0–M3 complete — water sim verified on-device, D15; M5 hypsometric relief tint pulled forward and done, D16; all committed on `main`, unpushed. **Next: M4 erosion — brief drafted at `06-m4-brief.md`, not started.**)
+**Last updated:** 2026-09-25 (M4 first slice + slumping + `?demo=erode` built and verified on-device; erosion behind toggles, keep-or-cut undecided — D22; next: tune Capacity. Earlier: 2026-09-23 — D17 map-edge sea/drain boundary added and verified ahead of M4. Previously: M0–M3 complete — water sim verified on-device, D15; M5 hypsometric relief tint pulled forward and done, D16; all committed on `main`, unpushed. **Next: M4 erosion — brief drafted at `06-m4-brief.md`, not started.**)
 
 ---
 
@@ -14,7 +14,7 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 | Item | Status |
 | --- | --- |
 | Brief and name | `01-brief.md` |
-| Decisions D1–D21 | Settled — `02-decisions.md`. |
+| Decisions D1–D22 | Settled (D23, terrain authority, still to log) — `02-decisions.md`. |
 | Design outline | Complete — `03-outline.md` |
 | M0 | **Complete** — `04-m0-brief.md`. Go/no-go passed: 60fps on both iPad and iPhone with real geometry. |
 | M1 | **Complete.** Procedural generator with player-facing sliders (ruggedness, depth/elevation range, rockiness, sand reach, water level) plus New Seed/Random/Flat presets. See D13. |
@@ -37,15 +37,13 @@ A god-view landscape toy named after the Qattara Depression Project — the real
 
 ## 4. Immediate next action — START HERE
 
-**Begin M4 (hydraulic erosion).** The brief is written: `06-m4-brief.md` — read it first, especially §4.1 (terrain becomes GPU-authoritative: sim owns `rock`/`earth`/`sand` buffers, writes the height texture each tick) and §3 (success criteria). Dane has seen the outline and is broadly OK with it but hasn't line-by-line reviewed — expect small adjustments.
+**M4 is mid-tuning (2026-09-25).** Built and verified on-device: hydraulic erosion + sediment transport, thermal slumping (0.95 ms, two-pass), dev panel (Hydraulic / Slumping / Rain switches, 1–8× fast-forward — ~3.3× is the real iPad ceiling, agreed as enough), conservation HUD, per-pass GPU ms, `?demo=erode`, and `npm run test:gpu` headless checks. Details and numbers: `06-m4-brief.md` §0. Erosion is still behind a toggle, **keep-or-cut undecided (D22)** — Dane decides after watching a *tuned* build.
 
-**First engine slice:** passes 4 + 5 only — erosion/deposition (`C = Kc·sin(tilt)·|v|`, sand taken before earth, the §4.4 clamps) and flux-based sediment advection — with the **total-solid-mass conservation readout** in the HUD from the first commit (it's to M4 what water-volume conservation was to M3). Hold thermal slumping (pass 7) and the `?demo=erode` scenario until that slice is stable. Build the **dev tuning panel** alongside it, not after (risk register: erosion-param interaction is "High").
-
-Reuse `storageNeighborIndex` / the `water.wgsl` neighbour arithmetic for the tilt gradient — **do not rederive** (D12, fourth time it would bite).
+**Next step: tune Capacity.** On `?demo=erode`, Dane found the channel cuts **too slowly, sluggish from the very start** — i.e. capacity-limited, not the sand→earth armouring slowdown. Session ended just as he was about to try raising **Capacity** from the 0.02 default (suggested 0.06, then 0.1–0.2; slider is log-scaled). Watch `susp` rise with it and `Δmax` stay well under ~0.1 m/tick (pitting risk). When he names a value, make it the default in `DEFAULT_EROSION_SETTINGS` (`src/sim/erosionSim.ts`) — **slider values reset on reload**, so ask for the number. Then: delta behaviour at the shore, rain-on tributaries, then the other constants.
 
 **Also outstanding:** a quick iPhone check that the M3 sim holds ≥30 fps (the one unverified M3 §3 target — low risk; fold into M4's iPhone testing).
 
-**Repo state:** `main`, unpushed, 10 ahead of origin. Session commits: `b2a5ea6` M3 demo + debug water controls + FLUX_DAMPING removal · `ac0a997` M5 relief tint · `21fd018` docs close-out · plus a final docs commit with `06-m4-brief.md`. Working tree clean. `npx tsc --noEmit` clean, 29 tests pass.
+**Repo state (2026-09-25):** `main`, pushed, in sync with origin. Working tree clean. `npx tsc --noEmit` clean, 36 unit tests pass (`npm test`), 22 headless GPU checks pass (`npm run test:gpu`).
 
 **Done (2026-09-02):**
 - **M2 complete** — collapsible tools panel (`src/ui/toolbar.ts`), real deselect path, verified on-device.
