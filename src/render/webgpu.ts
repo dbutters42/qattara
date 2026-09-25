@@ -29,7 +29,10 @@ export async function initWebGPU(canvas: HTMLCanvasElement): Promise<GpuContext>
     );
   }
 
-  const device = await adapter.requestDevice();
+  // timestamp-query powers the per-pass GPU timings in the HUD (M4 brief
+  // §5.5). Optional: without it the timer falls back to whole-submit timing.
+  const requiredFeatures: GPUFeatureName[] = adapter.features.has('timestamp-query') ? ['timestamp-query'] : [];
+  const device = await adapter.requestDevice({ requiredFeatures });
   device.lost.then((info) => {
     throw new Error(`WebGPU device lost: ${info.reason} — ${info.message}`);
   });
@@ -71,7 +74,8 @@ export function describeAdapter(adapter: GPUAdapter, device: GPUDevice): string[
   }
   lines.push(
     `maxTextureDimension2D: ${device.limits.maxTextureDimension2D}`,
-    `maxBufferSize: ${device.limits.maxBufferSize}`
+    `maxBufferSize: ${device.limits.maxBufferSize}`,
+    `timestamp-query: ${device.features.has('timestamp-query') ? 'yes' : 'no'}`
   );
   return lines;
 }

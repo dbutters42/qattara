@@ -13,9 +13,12 @@ import { OrbitCamera } from './camera/orbitCamera';
 import { createControlPanel } from './ui/controls';
 import { createToolbar } from './ui/toolbar';
 import { pickTerrain } from './interaction/picking';
-import { applyBrush, type ToolId, type MaterialArrays } from './interaction/brush';
+import { applyBrush, type ToolId, type MaterialArrays, type BoundingBox } from './interaction/brush';
 import { createUndoStack } from './interaction/undoStack';
 import { createWaterSim } from './sim/waterSim';
+import { createErosionSim } from './sim/erosionSim';
+import { createGpuTimer } from './diagnostics/gpuTimer';
+import { createDevPanel } from './ui/devPanel';
 
 const FIELD_SIZE = 1024;
 const MESH_SIZE = 512;
@@ -198,7 +201,43 @@ async function main() {
   const frame = createFrameRenderer(gpu);
   const cursor = createCursorPipeline(gpu);
 
-  const undoStack = createUndoStack(5); // "a few actions" — brush strokes only, see undoStack.ts
+  // M4: the erosion sim takes ownership of the terrain on the GPU (brief
+  // §4.1). From here the CPU arrays are the *brush's* working copy — edits
+  // are uploaded by region, and the CPU copy is refreshed from the GPU
+  // periodically (see stepSim) so strokes land on the eroded terrain.
+  const erosion = createErosionSim(gpu, {
+    fieldCols: FIELD_SIZE,
+    fieldRows: FIELD_SIZE,
+    hexSize: HEX_SIZE,
+    heightTexture: terrain.heightTexture,
+    earthTexture: terrain.earthTexture,
+    sandTexture: terrain.sandTexture,
+    rock: terrainData.rock,
+    earth: terrainData.earth,
+    sand: terrainData.sand,
+    water: sim,
+  });
+  const gpuTimer = createGpuTimer(gpu.device);
+
+  // Bumped by anything that changes the terrain from the CPU side (brush,
+  // undo, regenerate). A GPU readback that was in flight across one of these
+  // is stale and gets dropped.
+  let terrainEditSerial = 0;
+
+  let simSpeed = 1; // dev fast-forward (brief §1): sim ticks per real tick
+  createDevPanel(erosion.settings, sim.isRaining(), {
+    onSpeed: (speed) => {
+      simSpeed = speed;
+    },
+    onRain: (enabled) => sim.setRain(enabled),
+  });
+
+  // Brush strokes only, see undoStack.ts. Each entry remembers the region
+  // its stroke touched: undo restores just that rectangle, so it doesn't
+  // also roll back erosion that happened elsewhere on the map since.
+  type StrokeSnapshot = MaterialArrays & { box: BoundingBox | null };
+  const undoStack = createUndoStack<StrokeSnapshot>(5); // "a few actions"
+  let strokeSnapshot: StrokeSnapshot | null = null;
 
   createControlPanel(TERRAIN_PARAMS, (newParams) => {
     const generated = generateAndPack(newParams);
@@ -206,6 +245,8 @@ async function main() {
     currentTerrainData = generated.terrainData;
     currentSeaLevel = newParams.waterLevel;
     terrain.updateTerrainData(generated.surfaceHeight, generated.terrainData.earth, generated.terrainData.sand, newParams.maxSoilDepth);
+    erosion.resetTerrain(generated.terrainData.rock, generated.terrainData.earth, generated.terrainData.sand);
+    terrainEditSerial++;
     // New terrain: restart the water from its flood fill and re-freeze the world beyond the edge (D17).
     sim.resetWater(generated.terrainData.water, generated.surfaceHeight, DEMO_DAMMING ? NO_SEA : newParams.waterLevel);
     undoStack.clear(); // old snapshots belong to a terrain that no longer exists
@@ -240,16 +281,27 @@ async function main() {
     },
     () => {
       const snapshot = undoStack.undo();
-      if (!snapshot) return;
-      currentTerrainData = snapshot;
-      for (let i = 0; i < currentSurfaceHeight.length; i++) {
-        currentSurfaceHeight[i] = snapshot.rock[i]! + snapshot.earth[i]! + snapshot.sand[i]!;
+      toolbar.setUndoEnabled(undoStack.canUndo());
+      if (!snapshot?.box) return;
+      // Restore only the stroke's rectangle (see StrokeSnapshot above).
+      const box = snapshot.box;
+      const cur = currentTerrainData;
+      for (let row = box.rowMin; row <= box.rowMax; row++) {
+        const from = row * FIELD_SIZE + box.colMin;
+        const to = row * FIELD_SIZE + box.colMax + 1;
+        cur.rock.set(snapshot.rock.subarray(from, to), from);
+        cur.earth.set(snapshot.earth.subarray(from, to), from);
+        cur.sand.set(snapshot.sand.subarray(from, to), from);
+        for (let idx = from; idx < to; idx++) {
+          currentSurfaceHeight[idx] = cur.rock[idx]! + cur.earth[idx]! + cur.sand[idx]!;
+        }
       }
-      terrain.updateTerrainData(currentSurfaceHeight, snapshot.earth, snapshot.sand, TERRAIN_PARAMS.maxSoilDepth);
-      // Water is sim-owned now (brief §4.1). It keeps flowing over whatever
+      terrain.updateTerrainRegion(box, currentSurfaceHeight, cur.earth, cur.sand);
+      erosion.uploadRegion(box, cur.rock, cur.earth, cur.sand);
+      terrainEditSerial++;
+      // Water is sim-owned (M3 brief §4.1). It keeps flowing over whatever
       // terrain exists and reads the height texture live, so the reverted
       // terrain simply takes effect on the next tick — undo doesn't touch it.
-      toolbar.setUndoEnabled(undoStack.canUndo());
     }
   );
 
@@ -307,10 +359,14 @@ async function main() {
       }
     }
     terrain.updateTerrainRegion(box, currentSurfaceHeight, currentTerrainData.earth, currentTerrainData.sand);
-    // The write above lands in `terrain.heightTexture`, which the water sim
-    // samples read-only every tick (brief §4.1). A brush edit therefore
-    // affects the flow on the next sim tick with nothing more to do here —
-    // raise a ridge across a channel and the water backs up behind it.
+    // The texture write above is what the renderer and the water sim read,
+    // so the edit shows (and diverts the flow) on the next tick. The upload
+    // below puts it in the erosion sim's buffers too — they own the terrain
+    // now (M4 brief §4.1) and would otherwise overwrite the edit on their
+    // next compose.
+    erosion.uploadRegion(box, currentTerrainData.rock, currentTerrainData.earth, currentTerrainData.sand);
+    terrainEditSerial++;
+    if (strokeSnapshot) strokeSnapshot.box = unionBox(strokeSnapshot.box, box);
   }
 
   let isPainting = false;
@@ -333,11 +389,13 @@ async function main() {
     }
 
     touchedCellsThisStroke = new Set();
-    undoStack.push({
+    strokeSnapshot = {
       rock: currentTerrainData.rock.slice(),
       earth: currentTerrainData.earth.slice(),
       sand: currentTerrainData.sand.slice(),
-    });
+      box: null,
+    };
+    undoStack.push(strokeSnapshot);
     toolbar.setUndoEnabled(true);
     paintAt(e);
   });
@@ -349,6 +407,7 @@ async function main() {
     cursorPoint = null;
     levelReference = null; // next stroke establishes its own fresh reference
     touchedCellsThisStroke = null;
+    strokeSnapshot = null;
   };
   canvas.addEventListener('pointerup', stopPainting);
   canvas.addEventListener('pointercancel', stopPainting);
@@ -377,37 +436,111 @@ async function main() {
     }
   }
 
-  // The water sim runs on a fixed 30 Hz clock, decoupled from the render
-  // frame rate (outline §3 / brief §4.6). Accumulate real elapsed time, spend
-  // it in whole ticks, and cap the catch-up so a backgrounded tab coming back
-  // doesn't trigger a huge stall.
+  // The sim runs on a fixed 30 Hz clock, decoupled from the render frame
+  // rate (outline §3 / M3 brief §4.6). Accumulate real elapsed time, spend it
+  // in whole ticks, and cap the catch-up so a backgrounded tab coming back
+  // doesn't trigger a huge stall. The dev fast-forward multiplies the time
+  // fed in: more ticks per frame, each the same size — so a fast-forwarded
+  // run behaves exactly like a real-time one, just sooner (M4 brief §1).
   const SIM_TICK_HZ = 30;
   const SIM_TICK_DT = 1 / SIM_TICK_HZ;
-  const MAX_STEPS_PER_FRAME = 5;
+  const MAX_STEPS_PER_FRAME = 5; // at 1×; scales with speed
+  const STATS_INTERVAL_MS = 1000;
+  const MIRROR_INTERVAL_MS = 1000;
   let simAccumulator = 0;
   let lastSimClock = performance.now();
-  let ticksSinceStatsRequest = 0;
   let ticksThisSecond = 0;
   let ticksPerSecond = 0;
   let statsSecondClock = performance.now();
+  let lastStatsAt = 0;
+  let lastMirrorAt = 0;
+  let mirrorRetry = false; // last mirror was dropped as stale — fetch again even if nothing's eroded since
   let lastVolume = 0;
   let lastMaxDepth = 0;
   let lastMinDepth = 0;
+  let erosionLine = 'erosion: —';
+  // Conservation baseline (brief §3): loose + exported should stay at this
+  // value until the next CPU-side terrain edit, which resets it.
+  let massBaseline: { serial: number; total: number } | null = null;
+
+  function runTick(sample: boolean): void {
+    gpuTimer.beginTick(sample);
+    const encoder = gpu!.device.createCommandEncoder();
+    const waterBufs = sim.encode(encoder, SIM_TICK_DT, gpuTimer.pass('water'));
+    erosion.encode(encoder, SIM_TICK_DT, waterBufs, gpuTimer);
+    gpuTimer.resolve(encoder);
+    gpu!.device.queue.submit([encoder.finish()]);
+    sim.afterSubmit();
+    erosion.afterSubmit();
+    gpuTimer.afterSubmit();
+  }
+
+  function requestStats(): void {
+    sim.requestStats((s) => {
+      lastVolume = s.totalVolume;
+      lastMaxDepth = s.maxDepth;
+      lastMinDepth = s.minDepth;
+    });
+    const serial = terrainEditSerial;
+    erosion.requestStats((e) => {
+      if (serial !== terrainEditSerial) return; // a brush edit landed mid-flight — this sample straddles it
+      const total = e.looseVolume + e.exportedVolume;
+      if (!massBaseline || massBaseline.serial !== serial) massBaseline = { serial, total };
+      const drift = massBaseline.total !== 0 ? ((total - massBaseline.total) / Math.abs(massBaseline.total)) * 100 : 0;
+      const negative = Math.min(e.minEarth, e.minSand, e.minSuspended);
+      erosionLine =
+        `erosion: ${erosion.settings.hydraulic ? 'on' : 'off'} | loose ${e.looseVolume.toFixed(0)} drift ${drift >= 0 ? '+' : ''}${drift.toExponential(1)}%` +
+        ` | susp ${e.suspendedVolume.toFixed(1)} max ${e.maxSuspended.toPrecision(2)}` +
+        ` | out ${e.exportedVolume.toFixed(1)} | Δmax ${e.maxTickChange.toPrecision(2)}/tick` +
+        (negative < 0 ? ` | NEGATIVE ${negative.toPrecision(2)}` : '');
+    });
+  }
+
+  function refreshMirror(now: number): void {
+    if (isPainting || now - lastMirrorAt < MIRROR_INTERVAL_MS) return;
+    if (!erosion.isDirty() && !mirrorRetry) return;
+    lastMirrorAt = now;
+    const serial = terrainEditSerial;
+    erosion.requestMirror((earth, sand) => {
+      // A brush edit after the copy was taken would be overwritten by it —
+      // drop it and fetch again next interval.
+      if (serial !== terrainEditSerial || isPainting) {
+        mirrorRetry = true;
+        return;
+      }
+      mirrorRetry = false;
+      const cur = currentTerrainData;
+      cur.earth.set(earth);
+      cur.sand.set(sand);
+      for (let i = 0; i < currentSurfaceHeight.length; i++) {
+        currentSurfaceHeight[i] = cur.rock[i]! + earth[i]! + sand[i]!;
+      }
+    });
+  }
 
   function stepSim(): void {
     const now = performance.now();
-    simAccumulator += Math.min((now - lastSimClock) / 1000, 0.25);
+    simAccumulator += Math.min((now - lastSimClock) / 1000, 0.25) * simSpeed;
     lastSimClock = now;
 
+    let sampleNext = false;
+    if (now - lastStatsAt >= STATS_INTERVAL_MS) {
+      lastStatsAt = now;
+      requestStats();
+      sampleNext = true;
+    }
+    refreshMirror(now);
+
+    const maxSteps = MAX_STEPS_PER_FRAME * simSpeed;
     let steps = 0;
-    while (simAccumulator >= SIM_TICK_DT && steps < MAX_STEPS_PER_FRAME) {
-      sim.step(SIM_TICK_DT);
+    while (simAccumulator >= SIM_TICK_DT && steps < maxSteps) {
+      runTick(sampleNext);
+      sampleNext = false;
       simAccumulator -= SIM_TICK_DT;
       steps++;
-      ticksSinceStatsRequest++;
       ticksThisSecond++;
     }
-    if (steps === MAX_STEPS_PER_FRAME) simAccumulator = 0; // maxed out — shed the backlog, let sim time slip
+    if (steps === maxSteps) simAccumulator = 0; // maxed out — shed the backlog, let sim time slip
 
     if (steps > 0) water.setWaterBufferIndex(sim.currentWaterIndex());
 
@@ -416,16 +549,13 @@ async function main() {
       ticksThisSecond = 0;
       statsSecondClock = now;
     }
-    if (ticksSinceStatsRequest >= 30) {
-      ticksSinceStatsRequest = 0;
-      sim.requestStats((s) => {
-        lastVolume = s.totalVolume;
-        lastMaxDepth = s.maxDepth;
-        lastMinDepth = s.minDepth;
-      });
-    }
+    const timings = gpuTimer.latest();
+    const gpuLine = timings
+      ? `gpu ms: ${timings.map((t) => `${t.label} ${t.ms.toFixed(2)}`).join(' · ')}`
+      : `gpu ms: ${gpuTimer.perPass ? 'waiting' : 'n/a'}`;
     diagnostics.setSimStats(
-      `water: vol ${lastVolume.toFixed(0)} | depth ${lastMinDepth.toFixed(2)}..${lastMaxDepth.toFixed(2)} | ${ticksPerSecond}/s`
+      `water: vol ${lastVolume.toFixed(0)} | depth ${lastMinDepth.toFixed(2)}..${lastMaxDepth.toFixed(2)} | ${ticksPerSecond} ticks/s (${simSpeed}×)\n` +
+        `${erosionLine}\n${gpuLine}`
     );
   }
 
@@ -452,6 +582,16 @@ async function main() {
     requestAnimationFrame(tick);
   }
   requestAnimationFrame(tick);
+}
+
+function unionBox(a: BoundingBox | null, b: BoundingBox): BoundingBox {
+  if (!a) return { ...b };
+  return {
+    colMin: Math.min(a.colMin, b.colMin),
+    colMax: Math.max(a.colMax, b.colMax),
+    rowMin: Math.min(a.rowMin, b.rowMin),
+    rowMax: Math.max(a.rowMax, b.rowMax),
+  };
 }
 
 main().catch((err) => diagnostics.showFatal(`Unhandled startup error: ${err}`));

@@ -1,9 +1,9 @@
 import type { MaterialArrays } from './brush';
 
-export interface UndoStack {
-  push(snapshot: MaterialArrays): void;
+export interface UndoStack<T extends MaterialArrays = MaterialArrays> {
+  push(snapshot: T): void;
   /** Pops and returns the most recent snapshot, or null if there's nothing to undo. */
-  undo(): MaterialArrays | null;
+  undo(): T | null;
   clear(): void;
   canUndo(): boolean;
 }
@@ -14,8 +14,8 @@ export interface UndoStack {
 // in effect beforehand, not just the resulting material arrays. Regenerating
 // clears this stack (see main.ts) since old snapshots belong to a terrain
 // that no longer exists.
-export function createUndoStack(maxDepth: number): UndoStack {
-  const stack: MaterialArrays[] = [];
+export function createUndoStack<T extends MaterialArrays = MaterialArrays>(maxDepth: number): UndoStack<T> {
+  const stack: T[] = [];
   return {
     push(snapshot) {
       stack.push(snapshot);

@@ -1,3 +1,4 @@
+import hexGridSrc from './hexGrid.wgsl?raw';
 import shaderSrc from './water.wgsl?raw';
 import type { GpuContext } from '../render/webgpu';
 import { buildEdgeGhostHeights, edgeSlotCount } from './edgeGhost';
@@ -11,7 +12,7 @@ export interface WaterSimOptions {
   fieldRows: number;
   /** Hex centre-to-corner radius, world units — sets pipe length and cell area. */
   hexSize: number;
-  /** The terrain surface height texture (r32float). Read-only here; M3 does no erosion. */
+  /** The terrain surface height texture (r32float). Read-only here; M4's erosion sim rewrites it. */
   heightTexture: GPUTexture;
   /** Initial standing-water depth per cell (from the generator's flood fill). */
   initialWater: Float32Array;
@@ -36,19 +37,40 @@ export interface WaterSimStats {
   minDepth: number;
 }
 
+/** Which of the two water buffers a tick read from and wrote to. */
+export interface WaterTickBuffers {
+  /** Depth the flux was computed from (after rain/springs). */
+  before: 0 | 1;
+  /** Depth after this tick's flow + evaporation. */
+  after: 0 | 1;
+}
+
 export interface WaterSim {
-  /** One fixed-timestep tick: input → flux (+ clamp) → water (+ evaporation + velocity). One submit. */
-  step(dt: number): void;
+  /**
+   * Encode one fixed-timestep tick — input → flux (+ clamp) → water (+
+   * evaporation + velocity) — into `encoder`, as one compute pass. The caller
+   * adds the erosion passes after it and submits once (M4 brief §5.8); call
+   * `afterSubmit()` straight after the submit.
+   */
+  encode(encoder: GPUCommandEncoder, dt: number, passDescriptor?: GPUComputePassDescriptor): WaterTickBuffers;
+  afterSubmit(): void;
   /** Which ping-pong buffer holds the current state, for the renderer to bind. */
   currentWaterIndex(): 0 | 1;
   waterBufferA: GPUBuffer;
   waterBufferB: GPUBuffer;
+  /** Both water buffers, indexable by WaterTickBuffers. */
+  waterBuffers: readonly [GPUBuffer, GPUBuffer];
+  /** 6 outflow rates per cell, from the last tick. Read by M4 sediment advection. */
+  fluxBuffer: GPUBuffer;
+  /** 2 floats per cell (world-space flow velocity), from the last tick. Drives M4 erosion capacity. */
+  velocityBuffer: GPUBuffer;
   /**
    * Re-seed the water field after terrain regeneration and clear flux/velocity.
    * Also re-freezes the world beyond the edge from the new terrain (D17).
    */
   resetWater(data: Float32Array, surfaceHeight: Float32Array, seaLevel: number): void;
   setRain(enabled: boolean, ratePerSecond?: number): void;
+  isRaining(): boolean;
   setEvaporation(ratePerSecond: number): void;
   /** Non-blocking volume/max-depth readback; the callback fires a frame or two later. No-op if one is already in flight. */
   requestStats(callback: (stats: WaterSimStats) => void): void;
@@ -176,7 +198,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
     ],
   });
 
-  const module = device.createShaderModule({ code: shaderSrc });
+  const module = device.createShaderModule({ code: hexGridSrc + '\n' + shaderSrc });
   const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
   const inputPipeline = device.createComputePipeline({ layout, compute: { module, entryPoint: 'cs_input' } });
   const fluxPipeline = device.createComputePipeline({ layout, compute: { module, entryPoint: 'cs_flux' } });
@@ -227,11 +249,10 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
     device.queue.writeBuffer(paramsBuffer, 0, paramsBytes);
   }
 
-  function step(dt: number): void {
+  function encode(encoder: GPUCommandEncoder, dt: number, passDescriptor?: GPUComputePassDescriptor): WaterTickBuffers {
     writeParams(dt);
 
-    const encoder = device.createCommandEncoder();
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(passDescriptor);
     pass.setBindGroup(0, bindGroups[parity]);
     pass.setPipeline(inputPipeline);
     pass.dispatchWorkgroups(wgX, wgY);
@@ -241,6 +262,7 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
     pass.dispatchWorkgroups(wgX, wgY);
     pass.end();
 
+    const srcIndex: 0 | 1 = parity;
     const dstIndex: 0 | 1 = parity === 0 ? 1 : 0;
 
     if (pendingCopy) {
@@ -249,11 +271,12 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
       mapAfterSubmit = true;
     }
 
-    device.queue.submit([encoder.finish()]);
-
     currentIndex = dstIndex;
     parity = parity === 0 ? 1 : 0;
+    return { before: srcIndex, after: dstIndex };
+  }
 
+  function afterSubmit(): void {
     if (mapAfterSubmit) {
       mapAfterSubmit = false;
       readback
@@ -306,15 +329,20 @@ export function createWaterSim(gpu: GpuContext, opts: WaterSimOptions): WaterSim
   }
 
   return {
-    step,
+    encode,
+    afterSubmit,
     currentWaterIndex: () => currentIndex,
     waterBufferA,
     waterBufferB,
+    waterBuffers,
+    fluxBuffer,
+    velocityBuffer,
     resetWater,
     setRain(enabled, ratePerSecond) {
       rainEnabled = enabled;
       if (ratePerSecond !== undefined) rainRate = ratePerSecond;
     },
+    isRaining: () => rainEnabled,
     setEvaporation(ratePerSecond) {
       evapRate = ratePerSecond;
     },

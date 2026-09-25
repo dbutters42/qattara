@@ -7,7 +7,10 @@ import { buildReliefLUT, type ReliefTheme } from './reliefTheme';
 const RELIEF_LUT_WIDTH = 512;
 
 export interface TerrainPipeline {
+  /** Also writable as a storage texture: since M4 the erosion sim rewrites all three each tick it runs. */
   heightTexture: GPUTexture;
+  earthTexture: GPUTexture;
+  sandTexture: GPUTexture;
   vertexBuffer: GPUBuffer;
   indexBuffer: GPUBuffer;
   /** `seaLevel` is the current generator water level — the hinge of the hypsometric ramp. */
@@ -73,7 +76,7 @@ export function createTerrainPipeline(
     const texture = device.createTexture({
       size: { width: fieldCols, height: fieldRows },
       format: 'r32float',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.STORAGE_BINDING,
     });
     writeR32Float(texture, data);
     return texture;
@@ -223,5 +226,5 @@ export function createTerrainPipeline(
     pass.drawIndexed(mesh.indices.length);
   }
 
-  return { heightTexture, vertexBuffer, indexBuffer, updateUniforms, updateTerrainData, updateTerrainRegion, setReliefTheme, draw };
+  return { heightTexture, earthTexture, sandTexture, vertexBuffer, indexBuffer, updateUniforms, updateTerrainData, updateTerrainRegion, setReliefTheme, draw };
 }

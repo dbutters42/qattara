@@ -8,8 +8,9 @@
 //   cs_water  — net flow -> new depth (waterSrc -> waterDst), then
 //               evaporation and the derived velocity, both per-cell
 //
-// Terrain height is read-only here (M3 does no erosion). It lives in the
-// render pipeline's height texture; this sim only samples it.
+// Terrain height is read-only here. It lives in the render pipeline's height
+// texture, which M4's erosion sim (erosion.wgsl) rewrites from its own
+// rock/earth/sand buffers each tick it runs; this sim only samples it.
 //
 // Map edge (D17): each edge cell's off-field pipes lead to a "ghost" — ground
 // frozen at that cell's generation-time height (`ghostHeight`). Below sea
@@ -48,53 +49,8 @@ struct Params {
 @group(0) @binding(5) var<storage, read_write> velocity: array<f32>;  // 2 per cell
 @group(0) @binding(6) var<storage, read> ghostHeight: array<f32>;     // perimeter, see edgeSlot
 
-// Axial neighbour offsets (dq, dr), same order and meaning as
-// AXIAL_DIRECTIONS in src/hex/coords.ts. opposite(d) == (d + 3) % 6.
-fn dirOffset(d: u32) -> vec2<i32> {
-  var dirs = array<vec2<i32>, 6>(
-    vec2<i32>(1, 0), vec2<i32>(1, -1), vec2<i32>(0, -1),
-    vec2<i32>(-1, 0), vec2<i32>(-1, 1), vec2<i32>(0, 1),
-  );
-  return dirs[d];
-}
-
-// World-space unit vector of each axial direction (pointy-top), from
-// axialToWorld({q,r}) normalised. Used only to project the 6 pipe flows
-// into a single velocity vector — nothing in M3 consumes it, but M4 will.
-fn dirWorld(d: u32) -> vec2<f32> {
-  let s = 0.8660254; // sqrt(3)/2
-  var w = array<vec2<f32>, 6>(
-    vec2<f32>(1.0, 0.0), vec2<f32>(0.5, -s), vec2<f32>(-0.5, -s),
-    vec2<f32>(-1.0, 0.0), vec2<f32>(-0.5, s), vec2<f32>(0.5, s),
-  );
-  return w[d];
-}
-
-// Row-parity-correct neighbour index in storage space, or -1 if off-field.
-// This is the exact arithmetic of storageNeighborIndex() in
-// src/hex/coords.ts (which is unit-tested) — keep the two in lockstep. D12.
-fn neighborIndex(col: u32, row: u32, d: u32) -> i32 {
-  let off = dirOffset(d);
-  let q = i32(col) - i32(row) / 2;          // row >= 0, so / 2 == floor(row/2)
-  let nr = i32(row) + off.y;
-  if (nr < 0 || nr >= i32(params.fieldRows)) { return -1; }
-  let ncol = q + off.x + nr / 2;
-  if (ncol < 0 || ncol >= i32(params.fieldCols)) { return -1; }
-  return nr * i32(params.fieldCols) + ncol;
-}
-
-// Slot of an edge cell's ghost in `ghostHeight`: top row, bottom row, left
-// column, right column; corners take their row's slot. Exact arithmetic of
-// edgeSlot() in src/sim/edgeGhost.ts (unit-tested) — keep in lockstep.
-// Only ever called for cells that have an off-field pipe, i.e. edge cells.
-fn edgeSlot(col: u32, row: u32) -> u32 {
-  let cols = params.fieldCols;
-  let rows = params.fieldRows;
-  if (row == 0u) { return col; }
-  if (row == rows - 1u) { return cols + col; }
-  if (col == 0u) { return 2u * cols + row; }
-  return 2u * cols + rows + row; // col == cols - 1
-}
+// dirOffset / dirWorld / neighborIndex / edgeSlot live in hexGrid.wgsl,
+// prepended to this source at pipeline creation (shared with erosion.wgsl).
 
 fn texelOf(index: i32) -> vec2<i32> {
   let cols = i32(params.fieldCols);
@@ -136,12 +92,12 @@ fn cs_flux(@builtin(global_invocation_id) gid: vec3<u32>) {
   var newF = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
   var totalOutRate = 0.0;
   for (var d = 0u; d < 6u; d = d + 1u) {
-    let ni = neighborIndex(gid.x, gid.y, d);
+    let ni = neighborIndex(gid.x, gid.y, d, params.fieldCols, params.fieldRows);
     if (ni < 0) {
       // Off-field pipe to the ghost beyond the edge (D17). Same pipe
       // equation, one signed flux. The ghost's surface is the sea where its
       // frozen ground is below sea level, else the dry ground itself.
-      let gh = ghostHeight[edgeSlot(gid.x, gid.y)];
+      let gh = ghostHeight[edgeSlot(gid.x, gid.y, params.fieldCols, params.fieldRows)];
       let isSea = gh <= params.seaLevel;
       let ghostSurf = max(gh, params.seaLevel);
       var f = flux[i * 6u + d] + params.dt * params.gravity * params.pipeArea * (surfHere - ghostSurf) / params.pipeLength;
@@ -192,7 +148,7 @@ fn cs_water(@builtin(global_invocation_id) gid: vec3<u32>) {
     let f = flux[i * 6u + d];
     var out_d = f;
     var in_d = 0.0;
-    let ni = neighborIndex(gid.x, gid.y, d);
+    let ni = neighborIndex(gid.x, gid.y, d, params.fieldCols, params.fieldRows);
     if (ni >= 0) {
       in_d = flux[u32(ni) * 6u + ((d + 3u) % 6u)]; // neighbour's outflow toward us
     } else {
@@ -211,7 +167,7 @@ fn cs_water(@builtin(global_invocation_id) gid: vec3<u32>) {
   waterDst[i] = wNew;
 
   // Velocity = net flow vector / (pipe length * mean depth). Clamped depth
-  // so shallow cells don't produce absurd speeds. Not read in M3.
+  // so shallow cells don't produce absurd speeds. Drives M4 erosion capacity.
   let depthForVel = max(0.5 * (wOld + wNew), 1e-4);
   velocity[i * 2u + 0u] = vel.x / (params.pipeLength * depthForVel);
   velocity[i * 2u + 1u] = vel.y / (params.pipeLength * depthForVel);
